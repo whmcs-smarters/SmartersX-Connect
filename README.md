@@ -236,4 +236,5 @@ Smart Insights for Your WHMCS.
 <img width="300" alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 09" src="https://github.com/user-attachments/assets/68ffb28d-be5a-4fd3-aca2-42feb27020fe" />
 <img width="300" alt="image"  src="https://github.com/user-attachments/assets/8822f613-465b-4e77-ae28-2474f8a21128" />
 <img width="300" alt="image" src="https://github.com/user-attachments/assets/38192934-7e73-485e-80cb-70ca3989cb29" />
+<img  alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 17 59 02" src="https://github.com/user-attachments/assets/1fa71de6-66ed-470f-bfe5-cf3f8e4a8f21" />
 
