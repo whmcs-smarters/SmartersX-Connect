@@ -229,9 +229,9 @@ For support, feature requests, or bug reports, please open an issue in this repo
 
 Smart Insights for Your WHMCS.
 
-<img alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 42 02" src="https://github.com/user-attachments/assets/c637c363-9a64-4b77-b694-b96b684f64b4" />
-<img  alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 41" src="https://github.com/user-attachments/assets/53aca0fa-dd7b-4253-8ef8-09687fa684ee" />
-<img alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 35" src="https://github.com/user-attachments/assets/4e34d332-b765-4616-bdeb-258feaa1770a" />
-<img  alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 23" src="https://github.com/user-attachments/assets/3a387984-d824-40c5-bad5-5f991f167501" />
-<img  alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 09" src="https://github.com/user-attachments/assets/68ffb28d-be5a-4fd3-aca2-42feb27020fe" />
+<img width="300" height="2622" alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 42 02" src="https://github.com/user-attachments/assets/c637c363-9a64-4b77-b694-b96b684f64b4" />
+<img width="300" alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 41" src="https://github.com/user-attachments/assets/53aca0fa-dd7b-4253-8ef8-09687fa684ee" />
+<img width="300" alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 35" src="https://github.com/user-attachments/assets/4e34d332-b765-4616-bdeb-258feaa1770a" />
+<img width="300"  alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 23" src="https://github.com/user-attachments/assets/3a387984-d824-40c5-bad5-5f991f167501" />
+<img width="300" alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 09" src="https://github.com/user-attachments/assets/68ffb28d-be5a-4fd3-aca2-42feb27020fe" />
 
