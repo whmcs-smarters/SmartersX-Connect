@@ -18,7 +18,7 @@ function smartersxconnect_config()
         'name' => 'SmartersX Connect',
         'description' => ' <a href="https://www.smartersx.com/">SmartersX</a>  Connect seamlessly links your WHMCS platform with the  <a href="https://www.smartersx.com/">SmartersX</a>  application, enabling business owners and administrators to monitor key metrics, track growth, and stay informed with real-time business insights directly from their mobile devices.',
         'version' => '1.0.0',
-        'author' => '<a href="https://www.whmcssmarters.com/"><img src="../modules/addons/telegram/logo1.png" style="width: 200px;height: 40px;" alt="WHMCS SMARTERS"></a>',
+        'author' => '<a href="https://www.whmcssmarters.com/"><img src="../modules/addons/smartersxconnect/logo1.png" style="width: 200px;height: 40px;" alt="WHMCS SMARTERS"></a>',
         'fields' => [
             'delete_data_on_uninstall' => [
                 'FriendlyName' => 'Delete Data on Uninstall',
