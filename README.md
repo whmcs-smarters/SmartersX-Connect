@@ -1,4 +1,4 @@
-# SmartersX Connect
+<img width="1640" height="2360" alt="image" src="https://github.com/user-attachments/assets/b5fbd643-8c93-447c-9000-1c46612d09ee" /># SmartersX Connect
 
 > Smart Insights for Your WHMCS
 
@@ -234,4 +234,6 @@ Smart Insights for Your WHMCS.
 <img width="300" alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 35" src="https://github.com/user-attachments/assets/4e34d332-b765-4616-bdeb-258feaa1770a" />
 <img width="300"  alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 23" src="https://github.com/user-attachments/assets/3a387984-d824-40c5-bad5-5f991f167501" />
 <img width="300" alt="Simulator Screenshot - iPhone 17 - 2026-06-05 at 16 41 09" src="https://github.com/user-attachments/assets/68ffb28d-be5a-4fd3-aca2-42feb27020fe" />
+<img width="300" alt="image"  src="https://github.com/user-attachments/assets/8822f613-465b-4e77-ae28-2474f8a21128" />
+<img width="300" alt="image" src="https://github.com/user-attachments/assets/38192934-7e73-485e-80cb-70ca3989cb29" />
 
