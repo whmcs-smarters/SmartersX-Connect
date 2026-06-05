@@ -39,8 +39,8 @@ The SmartersX mobile application provides a secure and intuitive dashboard for m
 
 ### Available Platforms
 
-* iOS
-* Android
+* <a href="https://apps.apple.com/in/app/smartersx/id1643695817">iOS</a>
+* <a href="https://play.google.com/store/apps/details?id=com.techsmarters.smarterx&hl=en_IN">Android</a>
 
 ### Features
 
