@@ -2,7 +2,7 @@
 
 > Smart Insights for Your WHMCS
 
-SmartersX is a mobile business intelligence and revenue monitoring platform designed specifically for businesses powered by WHMCS.
+<a href="https://smartersx.com">SmartersX</a> is a mobile business intelligence and revenue monitoring platform designed specifically for businesses powered by WHMCS.
 
 The platform consists of two integrated components:
 
@@ -23,7 +23,7 @@ Managing a WHMCS-powered business often requires frequent access to the admin ar
 * Business performance
 * Transaction activity
 
-SmartersX was built to eliminate this dependency by bringing the most important business insights directly to your pocket.
+<a href="https://smartersx.com">SmartersX</a> was built to eliminate this dependency by bringing the most important business insights directly to your pocket.
 
 **Our mission:**
 
@@ -35,7 +35,7 @@ SmartersX was built to eliminate this dependency by bringing the most important 
 
 ## SmartersX Mobile Application
 
-The SmartersX mobile application provides a secure and intuitive dashboard for monitoring business activity.
+The <a href="https://smartersx.com">SmartersX</a> mobile application provides a secure and intuitive dashboard for monitoring business activity.
 
 ### Available Platforms
 
@@ -58,7 +58,7 @@ The SmartersX mobile application provides a secure and intuitive dashboard for m
 
 ## SmartersX Connect
 
-SmartersX Connect is a WHMCS add-on module that securely links your WHMCS installation with the SmartersX mobile application.
+<a href="https://smartersx.com">SmartersX</a> Connect is a WHMCS add-on module that securely links your WHMCS installation with the <a href="https://smartersx.com">SmartersX</a> mobile application.
 
 ### Features
 
@@ -204,7 +204,7 @@ SmartersX is built for:
 
 🎉 **7-Day Free Trial Included**
 
-Experience SmartersX risk-free and discover a smarter way to monitor your WHMCS business.
+Experience <a href="https://smartersx.com">SmartersX</a> risk-free and discover a smarter way to monitor your WHMCS business.
 
 ---
 
