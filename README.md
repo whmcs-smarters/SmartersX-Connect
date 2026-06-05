@@ -1,4 +1,4 @@
-<img width="1640" height="2360" alt="image" src="https://github.com/user-attachments/assets/b5fbd643-8c93-447c-9000-1c46612d09ee" /># SmartersX Connect
+# SmartersX Connect
 
 > Smart Insights for Your WHMCS
 
