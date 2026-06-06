@@ -25,6 +25,14 @@ add_hook('InvoicePaid', 1, function ($vars) {
             return;
         }
 
+        // Respect the global notifications toggle set in the module admin UI.
+        $globalEnabled = Capsule::table('tblconfiguration')
+            ->where('setting', 'smartersx_notifications_enabled')
+            ->value('value');
+        if ($globalEnabled !== null && (string) $globalEnabled !== '1') {
+            return;
+        }
+
         smartersxconnect_ensure_payment_notification_pipeline_table();
         $notification = Capsule::table('mod_smartersxconnect_payment_notifications')
             ->where('event_key', 'payment_received')
@@ -456,6 +464,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'syncDeviceSettings') {
             $row = $query->where('mobile_device_id', $mobileDeviceId)->first();
         }
 
+        // Read global notifications toggle to return to the mobile app.
+        $globalNotificationsEnabled = Capsule::table('tblconfiguration')
+            ->where('setting', 'smartersx_notifications_enabled')
+            ->value('value');
+        // Default to enabled if never set.
+        $globalEnabled = ($globalNotificationsEnabled === null || (string) $globalNotificationsEnabled === '1');
+
         if ($row) {
             $update = [];
             if ($fcm !== null) $update['devicetoken'] = $fcm;
@@ -463,7 +478,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'syncDeviceSettings') {
             if (!empty($update)) {
                 $query->where('id', $row->id)->update($update);
             }
-            echo json_encode(['status' => 'updated']);
+            echo json_encode(['status' => 'updated', 'global_notifications_enabled' => $globalEnabled]);
             exit;
         }
 
@@ -477,7 +492,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'syncDeviceSettings') {
         if ($mobileDeviceId) $insert['mobile_device_id'] = $mobileDeviceId;
         if ($enable !== null) $insert['payment_alerts'] = $enable;
         Capsule::table('mod_smartersxconnect_notification_devices')->insert($insert);
-        echo json_encode(['status' => 'created']);
+        echo json_encode(['status' => 'created', 'global_notifications_enabled' => $globalEnabled]);
         exit;
     } catch (\Throwable $e) {
         echo json_encode(['error' => $e->getMessage()]);
