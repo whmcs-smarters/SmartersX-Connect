@@ -27,13 +27,35 @@ class SmartersxConnectController
             // If system-level pairing (created from admin UI), auto-authorize and create device+token
             if ((int) $rec->userid === 0) {
                 $label = trim($_REQUEST['label'] ?? '') ?: null;
-                $deviceIdDb = Capsule::table('mod_smartersxconnect_devices')->insertGetId([
-                    'userid' => 0,
-                    'device_id' => $deviceId,
-                    'label' => $label,
-                    'meta' => json_encode(['paired_via' => 'qr']),
-                    'created_at' => date('Y-m-d H:i:s'),
-                ]);
+
+                // Reuse existing device record for this mobile device_id to avoid duplicates
+                // on re-scan or reconnect after module reactivation.
+                $existingDevice = Capsule::table('mod_smartersxconnect_devices')
+                    ->where('device_id', $deviceId)
+                    ->first();
+
+                if ($existingDevice) {
+                    $deviceIdDb = $existingDevice->id;
+                    if ($label) {
+                        Capsule::table('mod_smartersxconnect_devices')
+                            ->where('id', $deviceIdDb)
+                            ->update(['label' => $label]);
+                    }
+                } else {
+                    $deviceIdDb = Capsule::table('mod_smartersxconnect_devices')->insertGetId([
+                        'userid' => 0,
+                        'device_id' => $deviceId,
+                        'label' => $label,
+                        'meta' => json_encode(['paired_via' => 'qr']),
+                        'created_at' => date('Y-m-d H:i:s'),
+                    ]);
+                }
+
+                // Revoke any old tokens for this device before issuing a new one.
+                Capsule::table('mod_smartersxconnect_tokens')
+                    ->where('label', 'paired-device:' . $deviceIdDb)
+                    ->update(['revoked' => 1]);
+
                 $tokenResult = self::createApiToken(0, 'paired-device', $deviceIdDb);
                 Capsule::table('mod_smartersxconnect_pairs')->where('id', $rec->id)->update(['device_id' => $deviceId, 'state' => 'authorized', 'authorized_at' => date('Y-m-d H:i:s')]);
                 echo json_encode(['status' => 'ok', 'token' => $tokenResult['token'], 'device_id' => $deviceIdDb, 'device_table_id' => $deviceIdDb]);
@@ -1849,15 +1871,9 @@ function sxTestEvent(eventKey, modulelink) {
             return [];
         }
 
-        return Capsule::table('mod_smartersxconnect_notification_devices as nd')
-            ->join('mod_smartersxconnect_devices as d', function ($join) {
-                $join->on('nd.device_table_id', '=', 'd.id')
-                    ->orOn('nd.mobile_device_id', '=', 'd.device_id');
-            })
-            ->where('nd.status', 1)
-            ->where('nd.devicetoken', '!=', '')
-            ->select('nd.*')
-            ->distinct()
+        return Capsule::table('mod_smartersxconnect_notification_devices')
+            ->where('status', 1)
+            ->where('devicetoken', '!=', '')
             ->get();
     }
 
