@@ -1506,15 +1506,23 @@ function sxUpdateBulk() {
         echo '<div class="panel panel-default">';
         echo '<div class="panel-heading clearfix">';
         echo '<strong class="pull-left" style="line-height:26px">Payment Notifications Template</strong>';
-        echo '<form method="post" action="' . htmlspecialchars($modulelink . '&action=notification') . '" class="pull-right" style="margin:0">';
+        echo '<div class="pull-right" style="display:flex;align-items:center;gap:8px">';
+        if ($globalEnabled === '1') {
+            echo '<span class="label label-success" style="font-size:12px;padding:4px 8px">&#10003; Notifications ON</span>';
+        } else {
+            echo '<span class="label label-danger" style="font-size:12px;padding:4px 8px">&#10007; Notifications OFF</span>';
+        }
+        echo '<form method="post" action="' . htmlspecialchars($modulelink . '&action=notification') . '" style="margin:0">';
         echo '<input type="hidden" name="save_global_notifications" value="1">';
         if ($globalEnabled === '1') {
-            // No notifications_enabled field — handler receives nothing → sets to '0' (disabled).
-            echo '<button type="submit" class="btn btn-xs btn-success">&#10003; Enabled &mdash; click to disable</button>';
+            // Submits without notifications_enabled → handler sets '0' (disable)
+            echo '<button type="submit" class="btn btn-xs btn-default">Turn Off</button>';
         } else {
-            echo '<button type="submit" name="notifications_enabled" value="1" class="btn btn-xs btn-warning"><strong>&#10007; Disabled</strong> &mdash; click to enable</button>';
+            // Submits with notifications_enabled=1 → handler sets '1' (enable)
+            echo '<button type="submit" name="notifications_enabled" value="1" class="btn btn-xs btn-success">Turn On</button>';
         }
         echo '</form>';
+        echo '</div>';
         echo '</div>';
         echo '<div class="panel-body">';
         echo '<p class="text-muted">Customise the message sent to the app for each payment event.</p>';
@@ -1594,10 +1602,21 @@ function sxTestEvent(eventKey, modulelink) {
             ],
             [
                 $step1Done,
+                'Enable Firebase Cloud Messaging API',
+                'Google Cloud Console &rarr; APIs &amp; Services',
+                [
+                    'Go to <a href="https://console.cloud.google.com/apis/library/fcm.googleapis.com" target="_blank" rel="noopener">console.cloud.google.com/apis/library/fcm.googleapis.com</a>.',
+                    'Make sure the correct Firebase project is selected in the top project selector.',
+                    'Click <strong>Enable</strong> if the API is not already enabled.',
+                    '<strong>Without this step, all notification sends will fail with a 403 error even with valid credentials.</strong>',
+                ],
+            ],
+            [
+                $step1Done,
                 'Get your connection file',
                 'Firebase Console &rarr; Project Settings &rarr; Service Accounts',
                 [
-                    'In your Firebase project, click the <strong>gear icon</strong> (&#9881;) next to <em>Project Overview</em> and choose <strong>Project settings</strong>.',
+                    'In your Firebase project, click the <strong>gear icon</strong> (&#9881;) next to <em>Project Overview</em> and choose <strong>Settings</strong>.',
                     'Open the <strong>Service accounts</strong> tab.',
                     'Make sure <strong>Firebase Admin SDK</strong> is selected.',
                     'Click <strong>Generate new private key</strong>.',

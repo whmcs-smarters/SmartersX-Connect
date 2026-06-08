@@ -11,12 +11,6 @@ if (!defined('WHMCS')) {
 use WHMCS\Database\Capsule;
 require_once __DIR__ . '/version.php';
 
-add_hook('ClientLogin', 1, function ($vars) {
-    // Example: update last_seen for devices when client logs in
-    // $userId = $vars['userid'] ?? null;
-    return;
-});
-
 // AddTransaction hook: send payment notification when a transaction is recorded.
 // Using AddTransaction instead of InvoicePaid so that amountin, fees, rate, and
 // transid are available directly in $vars — no secondary tblaccounts query needed,
@@ -137,9 +131,8 @@ add_hook('AddTransaction', 1, function ($vars) {
             'id'             => (string) $invoiceId,
             'invoice_id'     => (string) $invoiceId,
             'transaction_id' => $transactionId,
-            'amount'         => number_format($rawAmount, 2),
+            'amount'         => sprintf('%.2f', $rawAmount),
             'event'          => 'payment_received',
-            '__filter_by'    => 'payment_alerts',
         ], $devices);
     } catch (\Throwable $th) {
         try {
@@ -155,6 +148,9 @@ add_hook('AddTransaction', 1, function ($vars) {
 
 function smartersxconnect_ensure_payment_notification_pipeline_table()
 {
+    static $done = false;
+    if ($done) return;
+    $done = true;
     smartersxconnect_ensure_notification_infrastructure_tables();
 
     if (!Capsule::schema()->hasTable('mod_smartersxconnect_payment_notifications')) {
@@ -188,6 +184,10 @@ function smartersxconnect_ensure_payment_notification_pipeline_table()
 
 function smartersxconnect_ensure_notification_infrastructure_tables()
 {
+    static $done = false;
+    if ($done) return;
+    $done = true;
+
     if (!Capsule::schema()->hasTable('mod_smartersxconnect_notification_devices')) {
         Capsule::schema()->create('mod_smartersxconnect_notification_devices', function ($table) {
             $table->increments('id');
@@ -243,16 +243,6 @@ function smartersxconnect_format_invoice_amount(array $invoice, array $client): 
         (float) ($invoice['total'] ?? 0),
         (int) ($client['currency'] ?? 0)
     );
-}
-
-function smartersxconnect_invoice_transaction_id($invoiceId)
-{
-    $transactionId = Capsule::table('tblaccounts')
-        ->where('invoiceid', $invoiceId)
-        ->orderBy('date', 'desc')
-        ->value('transid');
-
-    return $transactionId ? (string) $transactionId : '';
 }
 
 function smartersxconnect_get_service_account_credentials()
@@ -405,6 +395,7 @@ function smartersxconnect_sendFCMNotification($title, $body, $data = [], $device
         }
 
         $lastResponse = null;
+        $message = null;
         for ($i = 0; $i < count($devices); $i++) {
             $device = $devices[$i];
             // if filtering by payment_alerts requested and device has column, respect it
@@ -454,10 +445,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'syncDeviceSettings') {
     header('Content-Type: application/json');
     try {
         smartersxconnect_ensure_notification_infrastructure_tables();
-        $enable = isset($_POST['enable_payment_alerts']) ? intval($_POST['enable_payment_alerts']) : null;
-        $fcm = $_POST['fcm_token'] ?? null;
-        $deviceTableId = $_POST['deviceTableId'] ?? null;
-        $mobileDeviceId = $_POST['mobileDeviceId'] ?? null;
+        $enable         = isset($_POST['enable_payment_alerts']) ? intval($_POST['enable_payment_alerts']) : null;
+        $fcm            = isset($_POST['fcm_token']) ? trim((string) $_POST['fcm_token']) : null;
+        $deviceTableId  = isset($_POST['deviceTableId']) ? (int) $_POST['deviceTableId'] : null;
+        $mobileDeviceId = isset($_POST['mobileDeviceId']) ? trim((string) $_POST['mobileDeviceId']) : null;
 
         $rawToken = null;
         if (!empty($_SERVER['HTTP_AUTHORIZATION'])) {
