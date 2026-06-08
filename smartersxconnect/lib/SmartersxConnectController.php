@@ -262,14 +262,45 @@ class SmartersxConnectController
                 break;
 
             case 'testNotification':
-                echo json_encode(['status' => 'queued', 'message' => 'Test notification queued (stub)']);
+                // Send a real test FCM notification to the requesting device only.
+                if (!Capsule::schema()->hasTable('mod_smartersxconnect_notification_devices')) {
+                    echo json_encode(['error' => 'notification_not_configured']);
+                    break;
+                }
+                $notifDeviceQuery = Capsule::table('mod_smartersxconnect_notification_devices')
+                    ->where('status', 1)
+                    ->where('devicetoken', '!=', '');
+                $testDeviceTableId = self::deviceTableIdFromTokenRecord($tokenRecord);
+                if ($testDeviceTableId > 0) {
+                    $notifDeviceQuery->where('device_table_id', $testDeviceTableId);
+                } else {
+                    $testMobileDeviceId = trim($_REQUEST['mobileDeviceId'] ?? '');
+                    if ($testMobileDeviceId !== '') {
+                        $notifDeviceQuery->where('mobile_device_id', $testMobileDeviceId);
+                    } else {
+                        echo json_encode(['error' => 'device_not_registered']);
+                        break;
+                    }
+                }
+                $notifDevice = $notifDeviceQuery->first();
+                if (!$notifDevice) {
+                    echo json_encode(['error' => 'device_not_registered']);
+                    break;
+                }
+                self::loadNotificationHelpers();
+                if (!function_exists('smartersxconnect_sendFCMNotification')) {
+                    echo json_encode(['error' => 'notification_not_configured']);
+                    break;
+                }
+                smartersxconnect_sendFCMNotification(
+                    'Test Notification',
+                    'This is a test notification from WHMCS.',
+                    ['id' => 'test_notification', 'event' => 'test_notification'],
+                    [$notifDevice]
+                );
+                echo json_encode(['status' => 'sent']);
                 break;
 
-                                if ((int) $rec->userid !== (int) $userId) {
-                                    http_response_code(403);
-                                    echo json_encode(['error' => 'pairing does not belong to this account']);
-                                    break;
-                                }
             case 'transactionTotals':
                 $period = $_REQUEST['period'] ?? 'year';
                 $currency = self::defaultCurrency();
@@ -1936,7 +1967,100 @@ function sxTestEvent(eventKey, modulelink) {
     {
         echo '<div class="tab-pane active" id="tab-logs">';
         echo '<h4>Notification Logs</h4>';
-        echo '<p>Notification log viewer will appear here.</p>';
+
+        if (!Capsule::schema()->hasTable('mod_smartersxconnect_notification_logs')) {
+            echo '<div class="alert alert-info">No logs yet. Logs will appear here after the first notification is sent.</div>';
+            echo '</div>';
+            return;
+        }
+
+        $page     = max(1, (int) ($_GET['logpage'] ?? 1));
+        $perPage  = 20;
+        $offset   = ($page - 1) * $perPage;
+        $total    = Capsule::table('mod_smartersxconnect_notification_logs')->count();
+        $logs     = Capsule::table('mod_smartersxconnect_notification_logs')
+            ->orderBy('id', 'desc')
+            ->offset($offset)
+            ->limit($perPage)
+            ->get();
+
+        if (!$logs || count($logs) === 0) {
+            echo '<div class="alert alert-info">No notification logs found.</div>';
+            echo '</div>';
+            return;
+        }
+
+        // Clear log button
+        $modulelink = $vars['modulelink'] ?? '';
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['clear_notification_logs'])) {
+            Capsule::table('mod_smartersxconnect_notification_logs')->truncate();
+            echo '<div class="alert alert-success">Logs cleared.</div>';
+            echo '<meta http-equiv="refresh" content="0">';
+            echo '</div>';
+            return;
+        }
+
+        echo '<form method="post" style="margin-bottom:12px;" onsubmit="return confirm(\'Clear all notification logs?\');">';
+        echo '<input type="hidden" name="clear_notification_logs" value="1">';
+        echo '<button type="submit" class="btn btn-sm btn-danger">Clear All Logs</button>';
+        echo '</form>';
+
+        echo '<div class="table-responsive">';
+        echo '<table class="table table-bordered table-striped table-condensed" style="font-size:13px;">';
+        echo '<thead><tr><th>#</th><th>Date</th><th>Type / Title</th><th>Request (sent)</th><th>Response (FCM)</th></tr></thead>';
+        echo '<tbody>';
+        foreach ($logs as $log) {
+            $reqDecoded = json_decode($log->request ?? '', true);
+            $resDecoded = json_decode($log->response ?? '', true);
+
+            // Summarise the request: show token + notification title
+            if (is_array($reqDecoded) && isset($reqDecoded['message'])) {
+                $token   = $reqDecoded['message']['token'] ?? '';
+                $reqHtml = '<span title="' . htmlspecialchars($token) . '">'
+                    . htmlspecialchars(substr($token, 0, 16)) . '…</span>';
+            } else {
+                $reqHtml = '<span class="text-muted">' . htmlspecialchars(substr($log->request ?? '', 0, 80)) . '</span>';
+            }
+
+            // Summarise the response: highlight errors
+            if (is_array($resDecoded)) {
+                $status = $resDecoded['name'] ?? ($resDecoded['error']['status'] ?? ($resDecoded['error']['message'] ?? null));
+                if ($status) {
+                    $isError = isset($resDecoded['error']);
+                    $resHtml = '<span class="' . ($isError ? 'text-danger' : 'text-success') . '">'
+                        . htmlspecialchars($status) . '</span>';
+                } else {
+                    $resHtml = '<code>' . htmlspecialchars(substr(json_encode($resDecoded), 0, 120)) . '</code>';
+                }
+            } else {
+                $isErr   = stripos($log->response ?? '', 'error') !== false || stripos($log->response ?? '', 'Missing') !== false;
+                $resHtml = '<span class="' . ($isErr ? 'text-danger' : 'text-muted') . '">'
+                    . htmlspecialchars(substr($log->response ?? 'No response', 0, 120)) . '</span>';
+            }
+
+            echo '<tr>';
+            echo '<td>' . (int) $log->id . '</td>';
+            echo '<td style="white-space:nowrap;">' . htmlspecialchars($log->datetime ?? '') . '</td>';
+            echo '<td>' . htmlspecialchars($log->type ?? '') . '</td>';
+            echo '<td>' . $reqHtml . '</td>';
+            echo '<td>' . $resHtml . '</td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table></div>';
+
+        // Pagination
+        $totalPages = (int) ceil($total / $perPage);
+        if ($totalPages > 1) {
+            $baseUrl = htmlspecialchars($modulelink . '&action=notificationlogs');
+            echo '<nav><ul class="pagination pagination-sm">';
+            for ($p = 1; $p <= $totalPages; $p++) {
+                $active = $p === $page ? ' class="active"' : '';
+                echo "<li{$active}><a href=\"{$baseUrl}&logpage={$p}\">{$p}</a></li>";
+            }
+            echo '</ul></nav>';
+        }
+
+        echo '<p class="text-muted" style="font-size:12px;">Showing ' . count($logs) . ' of ' . $total . ' entries (newest first).</p>';
         echo '</div>';
     }
 

@@ -17,11 +17,36 @@ add_hook('ClientLogin', 1, function ($vars) {
     return;
 });
 
-// InvoicePaid hook: send the configured payment notification to registered devices.
-add_hook('InvoicePaid', 1, function ($vars) {
+// AddTransaction hook: send payment notification when a transaction is recorded.
+// Using AddTransaction instead of InvoicePaid so that amountin, fees, rate, and
+// transid are available directly in $vars — no secondary tblaccounts query needed,
+// which eliminates the race condition that caused amount = 0 on some gateways.
+add_hook('AddTransaction', 1, function ($vars) {
     try {
-        $invoiceId = (int) ($vars['invoiceid'] ?? 0);
+        smartersxconnect_ensure_notification_infrastructure_tables();
+
+        // WHMCS docs show both 'invoiceid' and the misspelled 'invocieid' — accept both.
+        $invoiceId = (int) ($vars['invoiceid'] ?? $vars['invocieid'] ?? 0);
+        $amountIn  = (float) ($vars['amountin'] ?? 0);
+
+        // Only notify for transactions linked to an invoice with a positive inbound amount.
+        // Log skipped cases so admins can see the hook IS firing.
         if ($invoiceId <= 0) {
+            Capsule::table('mod_smartersxconnect_notification_logs')->insert([
+                'request'  => 'AddTransaction hook: skipped (no invoiceid). vars keys: ' . implode(', ', array_keys($vars)),
+                'response' => 'skipped',
+                'type'     => 'hook_debug',
+                'datetime' => date('Y-m-d H:i:s'),
+            ]);
+            return;
+        }
+        if ($amountIn <= 0) {
+            Capsule::table('mod_smartersxconnect_notification_logs')->insert([
+                'request'  => 'AddTransaction hook: skipped (amountin=' . $amountIn . ', invoiceid=' . $invoiceId . ')',
+                'response' => 'skipped',
+                'type'     => 'hook_debug',
+                'datetime' => date('Y-m-d H:i:s'),
+            ]);
             return;
         }
 
@@ -30,6 +55,12 @@ add_hook('InvoicePaid', 1, function ($vars) {
             ->where('setting', 'smartersx_notifications_enabled')
             ->value('value');
         if ($globalEnabled !== null && (string) $globalEnabled !== '1') {
+            Capsule::table('mod_smartersxconnect_notification_logs')->insert([
+                'request'  => 'AddTransaction hook: skipped (global notifications disabled)',
+                'response' => 'skipped',
+                'type'     => 'hook_debug',
+                'datetime' => date('Y-m-d H:i:s'),
+            ]);
             return;
         }
 
@@ -38,72 +69,87 @@ add_hook('InvoicePaid', 1, function ($vars) {
             ->where('event_key', 'payment_received')
             ->first();
         if (!$notification || (int) $notification->enabled !== 1) {
+            Capsule::table('mod_smartersxconnect_notification_logs')->insert([
+                'request'  => 'AddTransaction hook: skipped (payment_received notification disabled or not found)',
+                'response' => 'skipped',
+                'type'     => 'hook_debug',
+                'datetime' => date('Y-m-d H:i:s'),
+            ]);
             return;
         }
 
-        $invoice = localAPI('GetInvoice', ['invoiceid' => $invoiceId]);
-        if (($invoice['result'] ?? 'success') !== 'success') {
-            return;
-        }
-
-        $userId = (int) ($invoice['userid'] ?? 0);
-        $user = localAPI('GetClientsDetails', ['clientid' => $userId]);
+        $userId = (int) ($vars['userid'] ?? 0);
+        $user   = localAPI('GetClientsDetails', ['clientid' => $userId]);
         $client = $user['client'] ?? [];
-        $name = trim(($client['firstname'] ?? '') . ' ' . ($client['lastname'] ?? ''));
+        $name   = trim(($client['firstname'] ?? '') . ' ' . ($client['lastname'] ?? ''));
         if ($name === '') {
             $name = 'Client #' . $userId;
         }
 
-        $amount = smartersxconnect_format_invoice_amount($invoice, $client);
-        $paymentMethod = $invoice['paymentmethod'] ?? ($invoice['paymentMethod'] ?? 'N/A');
-        $date = $invoice['datepaid'] ?? date('Y-m-d H:i:s');
-        $transactionId = smartersxconnect_invoice_transaction_id($invoiceId);
+        // amountin is already in the customer's own currency — use it as-is.
+        $rawAmount  = $amountIn;
+        $currencyId = (int) ($vars['currency'] ?? ($client['currency'] ?? 0));
+        $amount     = smartersxconnect_format_currency_amount($rawAmount, $currencyId);
+
+        $paymentMethod = (string) ($vars['gateway'] ?? 'N/A');
+        $date          = isset($vars['date']) ? (string) $vars['date'] : date('Y-m-d H:i:s');
+        $transactionId = (string) ($vars['transid'] ?? '');
+
         $replacements = [
-            '{amount}' => $amount,
-            '{total}' => $amount,
+            '{amount}'         => $amount,
+            '{total}'          => $amount,
             '{transaction_id}' => $transactionId,
-            '{transactionid}' => $transactionId,
-            '{invoice_id}' => (string) $invoiceId,
-            '{invoiceid}' => (string) $invoiceId,
-            '{client_name}' => $name,
-            '{name}' => $name,
-            '{userid}' => (string) $userId,
-            '{email}' => (string) ($client['email'] ?? ''),
-            '{payment_method}' => (string) $paymentMethod,
-            '{date}' => (string) $date,
+            '{transactionid}'  => $transactionId,
+            '{invoice_id}'     => (string) $invoiceId,
+            '{invoiceid}'      => (string) $invoiceId,
+            '{client_name}'    => $name,
+            '{name}'           => $name,
+            '{userid}'         => (string) $userId,
+            '{email}'          => (string) ($client['email'] ?? ''),
+            '{payment_method}' => $paymentMethod,
+            '{date}'           => $date,
         ];
 
         $subject = strtr($notification->title_template, $replacements);
         $message = strtr($notification->body_template, $replacements);
 
-        // find devices that are active and have a device token
         $query = Capsule::table('mod_smartersxconnect_notification_devices')->where('status', 1)->where('devicetoken', '!=', '');
-
-        // If the payment_alerts column exists, only select devices with it enabled
         try {
             if (Capsule::schema()->hasColumn('mod_smartersxconnect_notification_devices', 'payment_alerts')) {
                 $query = $query->where('payment_alerts', 1);
             }
         } catch (\Throwable $_) {
-            // If schema check fails for any reason, ignore and continue
+            // ignore
         }
 
         $devices = $query->get();
         if (!$devices || count($devices) == 0) {
-            // nothing to notify
+            Capsule::table('mod_smartersxconnect_notification_logs')->insert([
+                'request'  => 'AddTransaction hook: no devices with payment_alerts enabled and a valid token',
+                'response' => 'skipped',
+                'type'     => 'hook_debug',
+                'datetime' => date('Y-m-d H:i:s'),
+            ]);
             return;
         }
 
-        // Use the shared sender to dispatch notifications
         smartersxconnect_sendFCMNotification($subject, $message, [
-            'id' => (string) $invoiceId,
-            'invoice_id' => (string) $invoiceId,
-            'transaction_id' => (string) $transactionId,
-            'event' => 'payment_received',
-            '__filter_by' => 'payment_alerts',
+            'id'             => (string) $invoiceId,
+            'invoice_id'     => (string) $invoiceId,
+            'transaction_id' => $transactionId,
+            'amount'         => number_format($rawAmount, 2),
+            'event'          => 'payment_received',
+            '__filter_by'    => 'payment_alerts',
         ], $devices);
     } catch (\Throwable $th) {
-        // swallow to avoid breaking WHMCS flows
+        try {
+            Capsule::table('mod_smartersxconnect_notification_logs')->insert([
+                'request'  => 'AddTransaction hook exception: ' . $th->getMessage(),
+                'response' => $th->getTraceAsString(),
+                'type'     => 'hook_error',
+                'datetime' => date('Y-m-d H:i:s'),
+            ]);
+        } catch (\Throwable $_) {}
     }
 });
 
@@ -178,10 +224,9 @@ function smartersxconnect_ensure_notification_infrastructure_tables()
     }
 }
 
-function smartersxconnect_format_invoice_amount($invoice, $client)
+function smartersxconnect_format_currency_amount(float $amount, int $currencyId): string
 {
-    $total = (float) ($invoice['total'] ?? 0);
-    $currencyId = (int) ($client['currency'] ?? 0);
+    $total = (float) $amount;
     if ($currencyId > 0) {
         $currency = Capsule::table('tblcurrencies')->where('id', $currencyId)->first();
         if ($currency) {
@@ -190,6 +235,14 @@ function smartersxconnect_format_invoice_amount($invoice, $client)
     }
 
     return number_format($total, 2);
+}
+
+function smartersxconnect_format_invoice_amount(array $invoice, array $client): string
+{
+    return smartersxconnect_format_currency_amount(
+        (float) ($invoice['total'] ?? 0),
+        (int) ($client['currency'] ?? 0)
+    );
 }
 
 function smartersxconnect_invoice_transaction_id($invoiceId)
@@ -293,11 +346,11 @@ function smartersxconnect_generateAccessToken($serviceAccount) {
         'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
         'assertion' => $jwt
     ]));
-    // Security: enforce TLS verification and a sensible timeout
-    curl_setopt($ch, CURLOPT_FAILONERROR, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 10);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+    // Do NOT set CURLOPT_FAILONERROR — Google returns error details as JSON on 4xx,
+    // and we need to read that body to log the actual reason token generation failed.
     $response = curl_exec($ch);
     if ($response === false) {
         error_log('SmartersxConnect OAuth token request failed: ' . curl_error($ch));
@@ -336,16 +389,14 @@ function smartersxconnect_sendFCMNotification($title, $body, $data = [], $device
             return;
         }
 
-        // obtain access token
-        if (!$servercredentials) {
+        // obtain access token — regenerate only if older than 55 minutes (tokens last 60 min)
+        $tokenAge = $servercredentials && $servercredentials->accesstoken
+            ? (time() - strtotime($servercredentials->datetime))
+            : PHP_INT_MAX;
+        if ($tokenAge >= 3300) {
             $accessToken = smartersxconnect_generateAccessToken($serviceAccount);
         } else {
-            $diff = strtotime($servercredentials->datetime) - time();
-            if (($diff == 0 || $diff < 0) || !$servercredentials->accesstoken) {
-                $accessToken = smartersxconnect_generateAccessToken($serviceAccount);
-            } else {
-                $accessToken = $servercredentials->accesstoken;
-            }
+            $accessToken = $servercredentials->accesstoken;
         }
         $projectId = $serviceAccount['project_id'] ?? null;
         if (!$accessToken || !$projectId) {
@@ -363,7 +414,12 @@ function smartersxconnect_sendFCMNotification($title, $body, $data = [], $device
                 }
             }
             $deviceToken = $device->devicetoken;
-            $message = ['message' => ['token' => $deviceToken, 'notification' => ['title' => $title, 'body' => $body], 'data' => array_merge(['click_action' => 'FLUTTER_NOTIFICATION_CLICK', 'id' => (string)($data['id'] ?? '0')], $data)]];
+            // Strip internal routing keys before sending to FCM
+            $fcmData = array_merge(
+                ['click_action' => 'FLUTTER_NOTIFICATION_CLICK', 'id' => (string) ($data['id'] ?? '0')],
+                array_diff_key($data, ['__filter_by' => true])
+            );
+            $message = ['message' => ['token' => $deviceToken, 'notification' => ['title' => $title, 'body' => $body], 'data' => $fcmData]];
             $url = "https://fcm.googleapis.com/v1/projects/{$projectId}/messages:send";
             $headers = ['Authorization: Bearer ' . $accessToken, 'Content-Type: application/json'];
             $ch = curl_init();
@@ -372,14 +428,14 @@ function smartersxconnect_sendFCMNotification($title, $body, $data = [], $device
             curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
             curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($message));
-            // Security: enforce TLS verification and a sensible timeout
-            curl_setopt($ch, CURLOPT_FAILONERROR, true);
+            // Do NOT set CURLOPT_FAILONERROR — FCM returns structured error JSON on 4xx
+            // (e.g. UNREGISTERED, INVALID_ARGUMENT) which we need to log.
             curl_setopt($ch, CURLOPT_TIMEOUT, 10);
             curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
             curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
             $response = curl_exec($ch);
             if ($response === false) {
-                $lastResponse = 'FCM Send Error: ' . curl_error($ch);
+                $lastResponse = 'curl error: ' . curl_error($ch);
             } else {
                 $lastResponse = $response;
             }
