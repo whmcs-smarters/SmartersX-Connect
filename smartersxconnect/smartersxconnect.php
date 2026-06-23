@@ -95,6 +95,7 @@ function smartersxconnect_deactivate()
             Capsule::schema()->dropIfExists('mod_smartersxconnect_notification_devices');
             Capsule::schema()->dropIfExists('mod_smartersxconnect_notification_credentials');
             Capsule::schema()->dropIfExists('mod_smartersxconnect_notification_logs');
+            Capsule::schema()->dropIfExists('mod_smartersxconnect_firebase_oauth');
         }
     } catch (\Exception $e) {
         // ignore
