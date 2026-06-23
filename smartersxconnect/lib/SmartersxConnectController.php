@@ -1,6 +1,8 @@
 <?php
 
 use WHMCS\Database\Capsule;
+use WHMCS\Config\Setting;
+
 
 class SmartersxConnectController
 {
@@ -83,13 +85,48 @@ class SmartersxConnectController
             }
         }
 
+        // Public actions — no auth required
+        $action = $_REQUEST['action'] ?? '';
+        if ($action === 'getFirebaseConfig') {
+            self::ensureFirebaseConfigTable();
+            $fbRow = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+            $androidOptions = null;
+            $iosOptions     = null;
+            if ($fbRow && !empty($fbRow->android_google_services_json)) {
+                $androidOptions = self::extractAndroidFirebaseOptions($fbRow->android_google_services_json);
+            }
+            if ($fbRow && !empty($fbRow->ios_google_service_plist)) {
+                $iosOptions = self::extractIosFirebaseOptions($fbRow->ios_google_service_plist);
+            }
+            // Fallback: if DB config not set (Google account not connected), return hardcoded defaults
+            if ($androidOptions === null) {
+                $androidOptions = [
+                    'apiKey'            => 'AIzaSyDzS-nO60pTycFAR-6Koa1PK3psMofqpQE',
+                    'appId'             => '1:563298210802:android:220d049cfb976a2a3dd16b',
+                    'messagingSenderId' => '563298210802',
+                    'projectId'         => 'smarterxtest',
+                    'storageBucket'     => 'smarterxtest.firebasestorage.app',
+                ];
+            }
+            if ($iosOptions === null) {
+                $iosOptions = [
+                    'apiKey'            => 'AIzaSyCin7sDdyesPjPrGWj6wuHEOFqA1Q-hLHM',
+                    'appId'             => '1:563298210802:ios:6437abca34f19d163dd16b',
+                    'messagingSenderId' => '563298210802',
+                    'projectId'         => 'smarterxtest',
+                    'storageBucket'     => 'smarterxtest.firebasestorage.app',
+                    'bundleId'          => 'com.smarters.managex',
+                ];
+            }
+            echo json_encode(['android' => $androidOptions, 'ios' => $iosOptions]);
+            exit;
+        }
+
         if ($userId === null) {
             http_response_code(401);
             echo json_encode(['error' => 'Unauthorized']);
             exit;
         }
-
-        $action = $_REQUEST['action'] ?? '';
 
         switch ($action) {
             case 'pairRequest':
@@ -292,13 +329,24 @@ class SmartersxConnectController
                     echo json_encode(['error' => 'notification_not_configured']);
                     break;
                 }
-                smartersxconnect_sendFCMNotification(
+                $fcmRaw = smartersxconnect_sendFCMNotification(
                     'Test Notification',
                     'This is a test notification from WHMCS.',
                     ['id' => 'test_notification', 'event' => 'test_notification'],
                     [$notifDevice]
                 );
-                echo json_encode(['status' => 'sent']);
+                $fcmDecoded = is_string($fcmRaw) ? json_decode($fcmRaw, true) : null;
+                if (is_array($fcmDecoded) && isset($fcmDecoded['error'])) {
+                    $errCode = $fcmDecoded['error']['details'][0]['errorCode']
+                        ?? $fcmDecoded['error']['status']
+                        ?? $fcmDecoded['error']['message']
+                        ?? 'FCM_ERROR';
+                    echo json_encode(['status' => 'fcm_error', 'fcm_error' => $errCode, 'fcm_raw' => $fcmRaw]);
+                } elseif (is_array($fcmDecoded) && isset($fcmDecoded['name'])) {
+                    echo json_encode(['status' => 'sent', 'fcm_message_id' => $fcmDecoded['name']]);
+                } else {
+                    echo json_encode(['status' => 'sent', 'fcm_raw' => $fcmRaw]);
+                }
                 break;
 
             case 'transactionTotals':
@@ -697,6 +745,23 @@ class SmartersxConnectController
                 echo json_encode(['data' => self::mapInvoiceForMobile($invoice, $items)]);
                 break;
 
+            case 'getFirebaseConfig':
+                self::ensureFirebaseConfigTable();
+                $fbRow = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+                $androidOptions = null;
+                $iosOptions     = null;
+                if ($fbRow && !empty($fbRow->android_google_services_json)) {
+                    $androidOptions = self::extractAndroidFirebaseOptions($fbRow->android_google_services_json);
+                }
+                if ($fbRow && !empty($fbRow->ios_google_service_plist)) {
+                    $iosOptions = self::extractIosFirebaseOptions($fbRow->ios_google_service_plist);
+                }
+                echo json_encode([
+                    'android' => $androidOptions,
+                    'ios'     => $iosOptions,
+                ]);
+                break;
+
             default:
                 http_response_code(400);
                 echo json_encode(['error' => 'Unknown action']);
@@ -900,11 +965,11 @@ class SmartersxConnectController
 
         // Tabs definition
         $tabs = [
-            'connect' => 'Connect',
-            'connections' => 'Registered Devices',
-            'notification' => 'Notifications',
+            'connect'          => 'Connect',
+            'connections'      => 'Registered Devices',
+            'notification'     => 'Notifications',
             'notificationlogs' => 'Notification Logs',
-            'info' => 'About Us',
+            'info'             => 'About Us',
         ];
 
         $action = $_GET['action'] ?? 'connect';
@@ -1009,9 +1074,90 @@ class SmartersxConnectController
             self::handleSaveGlobalNotifications($modulelink);
         }
 
-        // Global banner — shown on every tab when notification service is not configured.
-        $credSummaryGlobal = self::getServiceAccountSummary();
-        if (empty($credSummaryGlobal['configured'])) {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['save_firebase_android'])) {
+            self::handleSaveFirebaseAndroid($modulelink);
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['save_firebase_ios'])) {
+            self::handleSaveFirebaseIos($modulelink);
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['delete_firebase_android'])) {
+            self::handleDeleteFirebaseConfig($modulelink, 'android');
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['delete_firebase_ios'])) {
+            self::handleDeleteFirebaseConfig($modulelink, 'ios');
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['sync_firebase_from_manager'])) {
+            self::loadFirebaseLibs();
+            self::maybeAutoSyncFirebaseConfigs(true);
+            header('Location: ' . $modulelink . '&action=notification&fb_synced=1');
+            exit;
+        }
+
+        // Firebase Manager: file download — must run before any HTML output
+        if ($action === 'firebase_manager' && !empty($_GET['firebase_download'])) {
+            self::loadFirebaseLibs();
+            self::handleFirebaseDownload($modulelink);
+        }
+
+        // Firebase Manager: OAuth callback from Google
+        if ($action === 'firebase_manager' && !empty($_GET['code'])) {
+            $systemUrl = \App::getSystemURL();
+            $adminFolder = \App::get_admin_folder_name();
+            
+            $modulelink = rtrim($systemUrl, '/') . '/' . $adminFolder . '/addonmodules.php?module=smartersxconnect';
+            $modulelink = htmlspecialchars($modulelink);
+            self::loadFirebaseLibs();
+            self::handleFirebaseOAuthCallback($modulelink);
+        }
+
+        // Firebase Manager: POST actions
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['save_firebase_oauth_creds'])) {
+            self::loadFirebaseLibs();
+            self::handleSaveFirebaseOAuthCreds($modulelink);
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['firebase_oauth_disconnect'])) {
+            self::loadFirebaseLibs();
+            self::handleFirebaseOAuthDisconnect($modulelink);
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['firebase_select_project'])) {
+            self::loadFirebaseLibs();
+            self::handleFirebaseSelectProject($modulelink);
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['firebase_create_android'])) {
+            self::loadFirebaseLibs();
+            self::handleFirebaseCreateAndroid($modulelink);
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['firebase_create_ios'])) {
+            self::loadFirebaseLibs();
+            self::handleFirebaseCreateIos($modulelink);
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['firebase_reset_android'])) {
+            self::loadFirebaseLibs();
+            \FirebaseAuth::saveAndroidAppId('');
+            header('Location: ' . $modulelink . '&action=firebase_manager');
+            exit;
+        }
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['firebase_reset_ios'])) {
+            self::loadFirebaseLibs();
+            \FirebaseAuth::saveIosAppId('');
+            header('Location: ' . $modulelink . '&action=firebase_manager');
+            exit;
+        }
+
+
+        // Global banner — shown on every tab until the Google account is connected.
+        self::loadFirebaseLibs();
+        if (!\FirebaseAuth::isConnected()) {
             $notifUrl = htmlspecialchars($modulelink . '&action=notification');
             echo '<div class="alert alert-warning" style="margin-bottom:12px">'
                 . '<strong>To get started with Payment instant Notifications</strong> &mdash; '
@@ -1035,6 +1181,7 @@ class SmartersxConnectController
                 self::renderConnections($vars);
                 break;
             case 'notification':
+            case 'firebase_manager':
                 self::renderNotificationSettings($vars);
                 break;
             case 'info':
@@ -1387,7 +1534,19 @@ function sxUpdateBulk() {
             ->orderBy('id', 'asc')
             ->get();
 
-        $isConfigured = !empty($credentialSummary['configured']);
+        // Auto-sync Firebase configs if Firebase Manager is connected
+        self::ensureFirebaseConfigTable();
+        self::maybeAutoSyncFirebaseConfigs();
+
+        // Firebase Manager state — used for sidebar step tracking and button gating
+        self::loadFirebaseLibs();
+        $oauthRow        = \FirebaseAuth::getRow();
+        $fbConnected     = \FirebaseAuth::isConnected();
+        $fbProjectSet    = $oauthRow && !empty($oauthRow->selected_project_id);
+        $fbAppsSet       = $oauthRow && !empty($oauthRow->android_app_id) && !empty($oauthRow->ios_app_id);
+
+        // Send Test button enabled if service account is stored OR Firebase Manager has a project selected.
+        $isConfigured = !empty($credentialSummary['configured']) || $fbProjectSet;
 
         echo '<div class="tab-pane active" id="tab-settings">';
 
@@ -1404,14 +1563,26 @@ function sxUpdateBulk() {
         if (!empty($_GET['fcm_deleted'])) {
             echo '<div class="alert alert-info"><strong>Deleted.</strong> Payment notification credentials have been removed.</div>';
         }
+        if (!empty($_GET['fb_synced'])) {
+            echo '<div class="alert alert-success"><strong>Synced!</strong> Firebase config files fetched from Firebase Manager.</div>';
+        }
+        if (!empty($_GET['fb_saved'])) {
+            $fbPlatform = $_GET['fb_saved'] === 'android' ? 'Android (google-services.json)' : 'iOS (GoogleService-Info.plist)';
+            echo '<div class="alert alert-success"><strong>Uploaded!</strong> ' . htmlspecialchars($fbPlatform) . ' config saved.</div>';
+        }
+        if (!empty($_GET['fb_deleted'])) {
+            $fbPlatform = $_GET['fb_deleted'] === 'android' ? 'Android' : 'iOS';
+            echo '<div class="alert alert-info"><strong>Deleted.</strong> ' . htmlspecialchars($fbPlatform) . ' Firebase config removed.</div>';
+        }
+        if (!empty($_GET['fb_error'])) {
+            echo '<div class="alert alert-danger"><strong>Error:</strong> ' . htmlspecialchars($_GET['fb_error']) . '</div>';
+        }
         self::renderTestNotificationStatus();
 
         $globalEnabled = Capsule::table('tblconfiguration')
             ->where('setting', 'smartersx_notifications_enabled')
             ->value('value');
         $globalEnabled = ($globalEnabled === null) ? '1' : $globalEnabled;
-
-        $step1Done = $isConfigured;
 
         // Ensure all rules are enabled — the global toggle controls on/off, not individual rows.
         Capsule::table('mod_smartersxconnect_payment_notifications')
@@ -1433,79 +1604,37 @@ function sxUpdateBulk() {
         // ── col-md-8: Settings ────────────────────────────────────────────
         echo '<div class="col-md-8">';
 
-        // Upload section
-        echo '<div class="panel panel-default">';
-        echo '<div class="panel-heading"><strong>Payment Notification Service</strong></div>';
-        echo '<div class="panel-body">';
+        // ── Firebase & Notification Setup (inline Firebase Manager) ─────────
+        echo '<style>
+.sx-ns-step-hdr{display:flex;align-items:center;gap:12px;padding:14px 18px;cursor:pointer;user-select:none;transition:background .15s}
+.sx-ns-step-hdr:hover{background:#f0f4f8!important}
+.sx-ns-badge{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;font-size:13px;font-weight:700;flex-shrink:0;transition:background .2s}
+.sx-ns-chevron{transition:transform .2s;font-size:11px}
+.sx-ns-chevron.open{transform:rotate(180deg)}
+.sx-ns-body{padding:18px 20px;border-top:1px solid #e8ecf0;background:#fff}
+.sx-upload-card{border:2px dashed #c8d0da;border-radius:6px;padding:20px 16px;text-align:center;transition:border-color .2s}
+.sx-upload-card:hover{border-color:#337ab7}
+.sx-upload-card input[type=file]{display:none}
+.sx-upload-card label{cursor:pointer;margin:0}
+.sx-info-row{display:flex;gap:6px;padding:5px 0;border-bottom:1px solid #f4f4f4;font-size:13px}
+.sx-info-row:last-child{border-bottom:none}
+.sx-info-key{color:#888;min-width:120px;flex-shrink:0}
+.sx-info-val{font-weight:600;word-break:break-all}
+</style>';
 
-        if ($isConfigured) {
-            // ── Configured state: large status + hidden reconfigure form ──
-            echo '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:8px 0">';
-            echo '<div>';
-            echo '<h4 style="margin:0 0 6px;color:#3c763d"><span class="glyphicon glyphicon-ok-circle"></span> &nbsp;Payment Notifications Active</h4>';
-            if (!empty($credentialSummary['project_id'])) {
-                echo '<p class="text-muted" style="margin:0">Firebase Project: <strong>' . htmlspecialchars($credentialSummary['project_id']) . '</strong>';
-                if (!empty($credentialSummary['client_email'])) {
-                    echo '<br>Service Account: <strong>' . htmlspecialchars($credentialSummary['client_email']) . '</strong>';
-                }
-                echo '</p>';
-            }
-            echo '</div>';
-            echo '<div style="display:flex;gap:8px;flex-wrap:wrap">';
-            echo '<button type="button" class="btn btn-default btn-sm" onclick="document.getElementById(\'sx-reconfig-form\').style.display=\'block\';this.parentElement.style.display=\'none\'">'
-                . '<span class="glyphicon glyphicon-refresh"></span> Reconfigure</button>';
-            echo '<button type="button" class="btn btn-danger btn-sm" onclick="document.getElementById(\'sx-delete-confirm\').style.display=\'block\';this.parentElement.style.display=\'none\'">'
-                . '<span class="glyphicon glyphicon-trash"></span> Delete</button>';
-            echo '</div>';
-            echo '</div>';
+        // ── Firebase Manager (inline — primary setup) ────────────────────────
+        self::loadFirebaseLibs();
+        self::renderFirebaseManager($vars);
 
-            // Delete confirmation alert
-            echo '<div id="sx-delete-confirm" style="display:none;margin-top:16px">';
-            echo '<div class="alert alert-danger">';
-            echo '<p><strong>Are you sure you want to delete the payment notification credentials?</strong><br>'
-                . 'This will remove the service account configuration. Push notifications will stop working immediately.</p>';
-            echo '<form method="post" action="' . htmlspecialchars($modulelink . '&action=notification') . '" style="display:inline">';
-            echo '<input type="hidden" name="delete_fcm_credentials" value="1">';
-            echo '<button type="submit" class="btn btn-danger btn-sm"><span class="glyphicon glyphicon-trash"></span> Yes, Delete Credentials</button>';
-            echo '</form>';
-            echo ' &nbsp;<button type="button" class="btn btn-default btn-sm" '
-                . 'onclick="document.getElementById(\'sx-delete-confirm\').style.display=\'none\';document.querySelector(\'.sx-action-btns\') && (document.querySelector(\'.sx-action-btns\').style.display=\'flex\')">'
-                . 'Cancel</button>';
-            echo '</div>';
-            echo '</div>';
+        echo '<script>
+function sxNsShow(id){document.getElementById(id).style.display="block";}
+function sxNsHide(id){document.getElementById(id).style.display="none";}
+</script>';
 
-            echo '<div id="sx-reconfig-form" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid #eee">';
-            echo '<form method="post" action="' . htmlspecialchars($modulelink . '&action=notification') . '" enctype="multipart/form-data">';
-            echo '<input type="hidden" name="save_fcm_credentials" value="1">';
-            echo '<div class="input-group" style="max-width:480px">';
-            echo '<input type="file" name="fcm_service_account_file" class="form-control" accept=".json,application/json" required>';
-            echo '<span class="input-group-btn"><button type="submit" class="btn btn-primary">Upload JSON</button></span>';
-            echo '</div>';
-            echo '<p class="help-block">Select the <code>.json</code> service account file from Firebase Console &rarr; Service Accounts.</p>';
-            echo '</form>';
-            echo '</div>';
-        } else {
-            // ── Not configured state: warning + upload form always visible ──
-            echo '<div class="alert alert-warning" style="margin-bottom:16px">';
-            echo '<h4 style="margin:0 0 4px"><span class="glyphicon glyphicon-warning-sign"></span> &nbsp;Not Configured</h4>';
-            echo '<p style="margin:0">Upload the service account JSON file to enable payment notifications on the SmartersX app.</p>';
-            echo '</div>';
-            echo '<form method="post" action="' . htmlspecialchars($modulelink . '&action=notification') . '" enctype="multipart/form-data">';
-            echo '<input type="hidden" name="save_fcm_credentials" value="1">';
-            echo '<div class="input-group" style="max-width:480px">';
-            echo '<input type="file" name="fcm_service_account_file" class="form-control" accept=".json,application/json" required>';
-            echo '<span class="input-group-btn"><button type="submit" class="btn btn-primary">Upload JSON</button></span>';
-            echo '</div>';
-            echo '<p class="help-block">Select the <code>.json</code> service account file from Firebase Console &rarr; Service Accounts.</p>';
-            echo '</form>';
-        }
-
-        echo '</div></div>';
-
-        // Notifications section
+        // ── Notification Templates ────────────────────────────────────────────
         echo '<div class="panel panel-default">';
         echo '<div class="panel-heading clearfix">';
-        echo '<strong class="pull-left" style="line-height:26px">Payment Notifications Template</strong>';
+        echo '<strong class="pull-left" style="line-height:26px">Notification Templates</strong>';
         echo '<div class="pull-right" style="display:flex;align-items:center;gap:8px">';
         if ($globalEnabled === '1') {
             echo '<span class="label label-success" style="font-size:12px;padding:4px 8px">&#10003; Notifications ON</span>';
@@ -1551,7 +1680,7 @@ function sxUpdateBulk() {
             echo '<div class="col-sm-3">';
             echo '<label class="control-label small">&nbsp;</label><br>';
             echo '<button type="button" class="btn btn-default btn-sm" '
-                . (!$isConfigured ? 'disabled title="Upload JSON file first"' : '')
+                . (!$isConfigured ? 'disabled title="Complete Firebase Manager setup first"' : '')
                 . ' onclick="sxTestEvent(\'' . htmlspecialchars($notification->event_key, ENT_QUOTES) . '\', \'' . htmlspecialchars($modulelink, ENT_QUOTES) . '\')">'
                 . '<span class="glyphicon glyphicon-envelope"></span> Send Test</button>';
             echo '</div>';
@@ -1587,101 +1716,102 @@ function sxTestEvent(eventKey, modulelink) {
         echo '<div class="panel panel-default">';
         echo '<div class="panel-heading"><strong>Setup Guide</strong></div>';
         echo '<div class="panel-body">';
-        $steps = [
+
+        // Determine current step (first incomplete)
+        $guideStepsDone = [$fbConnected, $fbProjectSet, $fbAppsSet, $step4Done, $step5Done];
+        $currentStep = count($guideStepsDone); // default: all done
+        foreach ($guideStepsDone as $si => $sd) {
+            if (!$sd) { $currentStep = $si; break; }
+        }
+
+        $guideSteps = [
             [
-                $step1Done,
-                'Connect your notification service',
-                '<a href="https://console.firebase.google.com/" target="_blank" rel="noopener">console.firebase.google.com</a>',
+                $fbConnected,
+                'Connect Firebase Manager',
+                'Link your Google account',
                 [
-                    'Sign in with your Google account <a href="https://console.firebase.google.com/" target="_blank" rel="noopener">console.firebase.google.com</a>.',
-                    'Click <strong>Add project</strong> and enter a project name (e.g. <em>SmartersX Notifications</em>).',
-                    'Disable or enable Google Analytics as preferred &mdash; it is not required.',
-                    'Click <strong>Create project</strong> and wait for it to be ready.',
-                    'Click <strong>Continue</strong> to open the project dashboard.',
+                    'Enter your Google OAuth Client ID &amp; Secret in Step 1 of the Firebase Manager panel.',
+                    'Click <strong>Connect Google Account</strong> and sign in.',
+                    'Grant the requested Firebase &amp; IAM permissions.',
                 ],
             ],
             [
-                $step1Done,
-                'Enable Firebase Cloud Messaging API',
-                'Google Cloud Console &rarr; APIs &amp; Services',
+                $fbProjectSet,
+                'Select Firebase Project',
+                'Choose the project to use',
                 [
-                    'Go to <a href="https://console.cloud.google.com/apis/library/fcm.googleapis.com" target="_blank" rel="noopener">console.cloud.google.com/apis/library/fcm.googleapis.com</a>.',
-                    'Make sure the correct Firebase project is selected in the top project selector.',
-                    'Click <strong>Enable</strong> if the API is not already enabled.',
-                    '<strong>Without this step, all notification sends will fail with a 403 error even with valid credentials.</strong>',
+                    'After connecting, a list of your Firebase projects appears.',
+                    'Select the project that matches your app and click <strong>Save Project</strong>.',
+                    'FCM service account credentials are fetched automatically.',
                 ],
             ],
             [
-                $step1Done,
-                'Get your connection file',
-                'Firebase Console &rarr; Project Settings &rarr; Service Accounts',
+                $fbAppsSet,
+                'Register Android &amp; iOS Apps',
+                'Create Firebase app entries',
                 [
-                    'In your Firebase project, click the <strong>gear icon</strong> (&#9881;) next to <em>Project Overview</em> and choose <strong>Settings</strong>.',
-                    'Open the <strong>Service accounts</strong> tab.',
-                    'Make sure <strong>Firebase Admin SDK</strong> is selected.',
-                    'Click <strong>Generate new private key</strong>.',
-                    'Confirm by clicking <strong>Generate key</strong> &mdash; a <code>.json</code> file will download to your computer.',
-                ],
-            ],
-            [
-                $step1Done,
-                'Upload connection File',
-                'Use the upload form on the left',
-                [
-                    'Go to the upload form on the left side of this page.',
-                    'Click <strong>Choose File</strong> and select the <code>.json</code> file you just downloaded.',
-                    'Click <strong>Upload JSON</strong> to save the credentials.',
-                    'A green <em>Configured</em> status will confirm success.',
+                    'In Step 3, confirm the bundle ID (<code>com.techsmarters.smarterx</code>) and display name.',
+                    'Click <strong>Create Android App</strong> then <strong>Create iOS App</strong>.',
+                    'Config files are synced to the module automatically — no manual download needed.',
                 ],
             ],
             [
                 $step4Done,
-                'Configure Notifications',
-                'Payment Notifications panel below',
+                'Configure Notification Templates',
+                'Customise message content',
                 [
-                    'Scroll down to the <strong>Payment Notifications</strong> panel.',
-                    'Make sure the global toggle is set to <strong>Enabled</strong>.',
-                    'Customise the <strong>Title</strong> and <strong>Message</strong> for each event.',
-                    'Use variables like <code>{amount}</code> and <code>{client_name}</code> in your templates.',
-                    'Click <strong>Save Notification Rules</strong> when done.',
+                    'Scroll down to <strong>Notification Templates</strong>.',
+                    'Edit the <strong>Title</strong> and <strong>Message</strong> for each payment event.',
+                    'Use <code>{amount}</code>, <code>{client_name}</code>, etc. as placeholders.',
+                    'Click <strong>Save Notification Rules</strong>.',
                 ],
             ],
             [
                 $step5Done,
                 'Send a Test Notification',
-                'Verify everything is working',
+                'Verify end-to-end delivery',
                 [
-                    'Make sure at least one device is connected and has the SmartersX app installed.',
-                    'Click the <strong>Send Test</strong> button next to any notification rule.',
-                    'You should receive a push notification on the registered device within a few seconds.',
-                    'If no notification arrives, check the Firebase project credentials and ensure the device has notification permissions enabled.',
+                    'Make sure at least one device is paired and has the app installed.',
+                    'Click <strong>Send Test</strong> next to any notification rule.',
+                    'Check Notification Logs if the notification does not arrive.',
                 ],
             ],
         ];
 
         echo '<ol class="list-unstyled">';
-        foreach ($steps as $i => $step) {
+        foreach ($guideSteps as $i => $step) {
             list($done, $title, $subtitle, $subSteps) = $step;
-            $badge = $done
-                ? '<span class="label label-success" style="font-size:12px;padding:4px 7px">' . ($i + 1) . '</span>'
-                : '<span class="label label-primary" style="font-size:12px;padding:4px 7px">' . ($i + 1) . '</span>';
-            $collapseId = 'sx-step-' . ($i + 1);
-            echo '<li style="margin-bottom:14px;border:1px solid #e3e6eb;border-radius:6px;overflow:hidden">';
-            // Step header — clickable to expand
-            echo '<div style="display:flex;gap:10px;align-items:center;padding:10px 12px;cursor:pointer;background:' . ($done ? '#f6fff7' : '#f9f9f9') . '" '
+            $isCurrent = ($i === $currentStep);
+            if ($done) {
+                $badgeStyle = 'background:#5cb85c;color:#fff';
+                $bgHdr      = '#f6fff7';
+                $badgeLabel = '&#10003;';
+            } elseif ($isCurrent) {
+                $badgeStyle = 'background:#337ab7;color:#fff';
+                $bgHdr      = '#f0f7ff';
+                $badgeLabel = (string)($i + 1);
+            } else {
+                $badgeStyle = 'background:#c8d0da;color:#555';
+                $bgHdr      = '#fafafa';
+                $badgeLabel = (string)($i + 1);
+            }
+            $collapseId  = 'sx-guide-' . ($i + 1);
+            $defaultOpen = $isCurrent ? 'block' : 'none';
+
+            echo '<li style="margin-bottom:10px;border:1px solid #e3e6eb;border-radius:6px;overflow:hidden">';
+            echo '<div style="display:flex;gap:10px;align-items:center;padding:10px 12px;cursor:pointer;background:' . $bgHdr . '" '
                 . 'onclick="var b=document.getElementById(\'' . $collapseId . '\');b.style.display=b.style.display===\'none\'?\'block\':\'none\'">';
-            echo '<div style="flex-shrink:0">' . $badge . '</div>';
+            echo '<div style="flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;font-size:12px;font-weight:700;' . $badgeStyle . '">' . $badgeLabel . '</div>';
             echo '<div style="flex:1">';
-            echo '<strong>' . $title . '</strong>';
+            echo '<strong style="font-size:13px">' . $title . '</strong>';
             echo '<br><small class="text-muted">' . $subtitle . '</small>';
             echo '</div>';
-            echo '<span class="glyphicon glyphicon-chevron-down text-muted" style="font-size:11px"></span>';
+            if ($isCurrent) echo '<span class="label label-info" style="font-size:10px">Current</span>';
             echo '</div>';
-            // Sub-steps — hidden by default, shown when header clicked
-            echo '<div id="' . $collapseId . '" style="display:none;padding:10px 12px;border-top:1px solid #e3e6eb;background:#fff">';
+            echo '<div id="' . $collapseId . '" style="display:' . $defaultOpen . ';padding:10px 12px;border-top:1px solid #e3e6eb;background:#fff">';
             echo '<ol style="margin:0;padding-left:18px">';
             foreach ($subSteps as $sub) {
-                echo '<li style="font-size:12px;color:#555;margin-bottom:6px;line-height:1.5">' . $sub . '</li>';
+                echo '<li style="font-size:12px;color:#555;margin-bottom:5px;line-height:1.5">' . $sub . '</li>';
             }
             echo '</ol>';
             echo '</div>';
@@ -1775,6 +1905,8 @@ function sxTestEvent(eventKey, modulelink) {
     private static function handleDeleteFcmCredentials($modulelink)
     {
         try {
+            self::loadFirebaseLibs();
+            \FirebaseAuth::clearServiceAccountJson();
             if (Capsule::schema()->hasTable('mod_smartersxconnect_notification_credentials')) {
                 Capsule::table('mod_smartersxconnect_notification_credentials')->truncate();
             }
@@ -1854,7 +1986,16 @@ function sxTestEvent(eventKey, modulelink) {
                 $devices
             );
 
-            if (is_string($result) && stripos($result, 'error') !== false) {
+            $resultDecoded = is_string($result) ? json_decode($result, true) : null;
+            if (is_array($resultDecoded) && isset($resultDecoded['error'])) {
+                $errCode = $resultDecoded['error']['details'][0]['errorCode']
+                    ?? $resultDecoded['error']['status']
+                    ?? $resultDecoded['error']['message']
+                    ?? 'FCM_ERROR';
+                header('Location: ' . $redirectBase . '&testerror=' . urlencode('FCM error: ' . $errCode));
+                exit;
+            }
+            if (is_string($result) && !isset($resultDecoded['name']) && stripos($result, 'error') !== false) {
                 header('Location: ' . $redirectBase . '&testerror=' . urlencode($result));
                 exit;
             }
@@ -1887,30 +2028,17 @@ function sxTestEvent(eventKey, modulelink) {
         ];
 
         try {
-            if (Capsule::schema()->hasTable('mod_smartersxconnect_notification_credentials')) {
-                $row = Capsule::table('mod_smartersxconnect_notification_credentials')->orderBy('id', 'asc')->first();
-                if ($row && !empty($row->service_account_json)) {
-                    $decoded = json_decode($row->service_account_json, true);
-                    if (is_array($decoded)) {
-                        $summary['configured'] = true;
-                        $summary['project_id'] = (string) ($decoded['project_id'] ?? '');
-                        $summary['client_email'] = (string) ($decoded['client_email'] ?? '');
-                        return $summary;
-                    }
+            self::loadFirebaseLibs();
+            $json = \FirebaseAuth::getServiceAccountJson();
+            if ($json) {
+                $decoded = json_decode($json, true);
+                if (is_array($decoded)) {
+                    $summary['configured'] = true;
+                    $summary['project_id'] = (string) ($decoded['project_id'] ?? '');
+                    $summary['client_email'] = (string) ($decoded['client_email'] ?? '');
                 }
             }
-        } catch (\Throwable $e) {
-            // Fall back to the legacy constant check below.
-        }
-
-        if (defined('FCMSmartersxconnect_CRED')) {
-            $decoded = json_decode(FCMSmartersxconnect_CRED, true);
-            if (is_array($decoded)) {
-                $summary['configured'] = true;
-                $summary['project_id'] = (string) ($decoded['project_id'] ?? '');
-                $summary['client_email'] = (string) ($decoded['client_email'] ?? '');
-            }
-        }
+        } catch (\Throwable $e) {}
 
         return $summary;
     }
@@ -2083,6 +2211,221 @@ function sxTestEvent(eventKey, modulelink) {
         echo '</div>';
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Firebase Config — table, admin UI, upload handlers, parsers, API helper
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static function ensureFirebaseConfigTable()
+    {
+        if (!Capsule::schema()->hasTable('mod_smartersxconnect_firebase_config')) {
+            Capsule::schema()->create('mod_smartersxconnect_firebase_config', function ($table) {
+                $table->increments('id');
+                $table->longText('android_google_services_json')->nullable();
+                $table->timestamp('android_uploaded_at')->nullable();
+                $table->longText('ios_google_service_plist')->nullable();
+                $table->timestamp('ios_uploaded_at')->nullable();
+            });
+        }
+    }
+
+
+
+    private static function androidUploadForm($modulelink)
+    {
+        return '<form method="post" action="' . htmlspecialchars($modulelink . '&action=notification') . '" enctype="multipart/form-data">'
+            . '<input type="hidden" name="save_firebase_android" value="1">'
+            . '<div class="input-group" style="max-width:420px">'
+            . '<input type="file" name="firebase_android_file" class="form-control" accept=".json,application/json" required>'
+            . '<span class="input-group-btn"><button type="submit" class="btn btn-primary">Upload JSON</button></span>'
+            . '</div>'
+            . '<p class="help-block">Firebase Console &rarr; Project Settings &rarr; Android app &rarr; <code>google-services.json</code></p>'
+            . '</form>';
+    }
+
+    private static function iosUploadForm($modulelink)
+    {
+        return '<form method="post" action="' . htmlspecialchars($modulelink . '&action=notification') . '" enctype="multipart/form-data">'
+            . '<input type="hidden" name="save_firebase_ios" value="1">'
+            . '<div class="input-group" style="max-width:420px">'
+            . '<input type="file" name="firebase_ios_file" class="form-control" accept=".plist,text/xml,application/xml" required>'
+            . '<span class="input-group-btn"><button type="submit" class="btn btn-primary">Upload Plist</button></span>'
+            . '</div>'
+            . '<p class="help-block">Firebase Console &rarr; Project Settings &rarr; iOS app &rarr; <code>GoogleService-Info.plist</code></p>'
+            . '</form>';
+    }
+
+    private static function handleSaveFirebaseAndroid($modulelink)
+    {
+        try {
+            self::ensureFirebaseConfigTable();
+            $fileInfo = $_FILES['firebase_android_file'] ?? null;
+            if (!$fileInfo || empty($fileInfo['tmp_name']) || !is_uploaded_file($fileInfo['tmp_name'])) {
+                header('Location: ' . $modulelink . '&action=firebase&fb_error=' . urlencode('Please choose a valid JSON file.'));
+                exit;
+            }
+            $content = file_get_contents($fileInfo['tmp_name']);
+            $decoded = json_decode($content, true);
+            if (!is_array($decoded) || empty($decoded['project_info']) || empty($decoded['client'])) {
+                header('Location: ' . $modulelink . '&action=firebase&fb_error=' . urlencode('Invalid google-services.json — missing project_info or client fields.'));
+                exit;
+            }
+            $row = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+            if ($row) {
+                Capsule::table('mod_smartersxconnect_firebase_config')
+                    ->where('id', $row->id)
+                    ->update(['android_google_services_json' => $content, 'android_uploaded_at' => date('Y-m-d H:i:s')]);
+            } else {
+                Capsule::table('mod_smartersxconnect_firebase_config')
+                    ->insert(['android_google_services_json' => $content, 'android_uploaded_at' => date('Y-m-d H:i:s')]);
+            }
+            header('Location: ' . $modulelink . '&action=notification&fb_saved=android');
+            exit;
+        } catch (\Throwable $e) {
+            header('Location: ' . $modulelink . '&action=notification&fb_error=' . urlencode($e->getMessage()));
+            exit;
+        }
+    }
+
+    private static function handleSaveFirebaseIos($modulelink)
+    {
+        try {
+            self::ensureFirebaseConfigTable();
+            $fileInfo = $_FILES['firebase_ios_file'] ?? null;
+            if (!$fileInfo || empty($fileInfo['tmp_name']) || !is_uploaded_file($fileInfo['tmp_name'])) {
+                header('Location: ' . $modulelink . '&action=notification&fb_error=' . urlencode('Please choose a valid plist file.'));
+                exit;
+            }
+            $content = file_get_contents($fileInfo['tmp_name']);
+            $parsed  = self::parsePlistToArray($content);
+            if (!is_array($parsed) || empty($parsed['GOOGLE_APP_ID'])) {
+                header('Location: ' . $modulelink . '&action=notification&fb_error=' . urlencode('Invalid GoogleService-Info.plist — GOOGLE_APP_ID not found.'));
+                exit;
+            }
+            $row = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+            if ($row) {
+                Capsule::table('mod_smartersxconnect_firebase_config')
+                    ->where('id', $row->id)
+                    ->update(['ios_google_service_plist' => $content, 'ios_uploaded_at' => date('Y-m-d H:i:s')]);
+            } else {
+                Capsule::table('mod_smartersxconnect_firebase_config')
+                    ->insert(['ios_google_service_plist' => $content, 'ios_uploaded_at' => date('Y-m-d H:i:s')]);
+            }
+            header('Location: ' . $modulelink . '&action=notification&fb_saved=ios');
+            exit;
+        } catch (\Throwable $e) {
+            header('Location: ' . $modulelink . '&action=notification&fb_error=' . urlencode($e->getMessage()));
+            exit;
+        }
+    }
+
+    private static function handleDeleteFirebaseConfig($modulelink, $platform)
+    {
+        try {
+            self::ensureFirebaseConfigTable();
+            $row = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+            if ($row) {
+                if ($platform === 'android') {
+                    Capsule::table('mod_smartersxconnect_firebase_config')
+                        ->where('id', $row->id)
+                        ->update(['android_google_services_json' => null, 'android_uploaded_at' => null]);
+                } else {
+                    Capsule::table('mod_smartersxconnect_firebase_config')
+                        ->where('id', $row->id)
+                        ->update(['ios_google_service_plist' => null, 'ios_uploaded_at' => null]);
+                }
+            }
+            header('Location: ' . $modulelink . '&action=notification&fb_deleted=' . $platform);
+            exit;
+        } catch (\Throwable $e) {
+            header('Location: ' . $modulelink . '&action=notification&fb_error=' . urlencode($e->getMessage()));
+            exit;
+        }
+    }
+
+    private static function parsePlistToArray($xmlString)
+    {
+        try {
+            $xml = @simplexml_load_string((string) $xmlString);
+            if (!$xml) {
+                return null;
+            }
+            // Apple plist: <dict> contains alternating <key> and value nodes
+            $dict = $xml->dict ?? null;
+            if (!$dict) {
+                return null;
+            }
+            $result = [];
+            $nodes  = $dict->children();
+            $keys   = [];
+            $vals   = [];
+            foreach ($nodes as $name => $node) {
+                if ($name === 'key') {
+                    $keys[] = (string) $node;
+                } else {
+                    $vals[] = ['type' => $name, 'node' => $node];
+                }
+            }
+            foreach ($keys as $i => $key) {
+                if (!isset($vals[$i])) {
+                    continue;
+                }
+                $type = $vals[$i]['type'];
+                $node = $vals[$i]['node'];
+                if ($type === 'string') {
+                    $result[$key] = (string) $node;
+                } elseif ($type === 'true') {
+                    $result[$key] = true;
+                } elseif ($type === 'false') {
+                    $result[$key] = false;
+                } elseif ($type === 'integer') {
+                    $result[$key] = (int) (string) $node;
+                } else {
+                    $result[$key] = (string) $node;
+                }
+            }
+            return $result;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private static function extractAndroidFirebaseOptions($jsonString)
+    {
+        $data = json_decode((string) $jsonString, true);
+        if (!is_array($data)) {
+            return null;
+        }
+        $projectInfo = $data['project_info'] ?? [];
+        $client      = $data['client'][0] ?? [];
+        $apiKey      = $client['api_key'][0]['current_key'] ?? '';
+        $appId       = $client['client_info']['mobilesdk_app_id'] ?? '';
+
+        return [
+            'apiKey'            => (string) $apiKey,
+            'appId'             => (string) $appId,
+            'messagingSenderId' => (string) ($projectInfo['project_number'] ?? ''),
+            'projectId'         => (string) ($projectInfo['project_id'] ?? ''),
+            'storageBucket'     => (string) ($projectInfo['storage_bucket'] ?? ''),
+        ];
+    }
+
+    private static function extractIosFirebaseOptions($plistString)
+    {
+        $data = self::parsePlistToArray((string) $plistString);
+        if (!is_array($data)) {
+            return null;
+        }
+
+        return [
+            'apiKey'            => (string) ($data['API_KEY'] ?? ''),
+            'appId'             => (string) ($data['GOOGLE_APP_ID'] ?? ''),
+            'messagingSenderId' => (string) ($data['GCM_SENDER_ID'] ?? ''),
+            'projectId'         => (string) ($data['PROJECT_ID'] ?? ''),
+            'storageBucket'     => (string) ($data['STORAGE_BUCKET'] ?? ''),
+            'iosBundleId'       => (string) ($data['BUNDLE_ID'] ?? ''),
+        ];
+    }
+
     private static function renderInfo($vars)
     {
         echo '<div class="tab-pane active" id="tab-info">';
@@ -2104,7 +2447,754 @@ Whether you’re in the office, traveling, or attending meetings, <a href="https
 }
 #tab-info a {
     color: #337ab7;    text-decoration: underline;
-    }   
-        </style>';   
+    }
+        </style>';
+    }
+
+    // ── Firebase Manager helpers ──────────────────────────────────────────────
+
+    private static function maybeAutoSyncFirebaseConfigs(bool $force = false): void
+    {
+        self::loadFirebaseLibs();
+        if (!\FirebaseAuth::isConnected()) return;
+
+        $oauthRow  = \FirebaseAuth::getRow();
+        if (!$oauthRow) return;
+
+        $projectId = $oauthRow->selected_project_id ?? '';
+        $androidId = $oauthRow->android_app_id ?? '';
+        $iosId     = $oauthRow->ios_app_id ?? '';
+        if (!$projectId) return;
+
+        self::ensureFirebaseConfigTable();
+        $fbRow = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+
+        $needAndroid = $androidId && ($force || !$fbRow || empty($fbRow->android_google_services_json));
+        $needIos     = $iosId     && ($force || !$fbRow || empty($fbRow->ios_google_service_plist));
+        if (!$needAndroid && !$needIos) return;
+
+        $token = \FirebaseAuth::getValidAccessToken();
+        if (!$token) return;
+
+        if ($needAndroid) {
+            $r = \FirebaseAPI::getAndroidConfig($token, $projectId, $androidId);
+            if (empty($r['error'])) {
+                $payload = ['android_google_services_json' => $r['content'], 'android_uploaded_at' => date('Y-m-d H:i:s')];
+                if ($fbRow) {
+                    Capsule::table('mod_smartersxconnect_firebase_config')->where('id', $fbRow->id)->update($payload);
+                } else {
+                    $newId = Capsule::table('mod_smartersxconnect_firebase_config')->insertGetId($payload);
+                    $fbRow = Capsule::table('mod_smartersxconnect_firebase_config')->where('id', $newId)->first();
+                }
+            }
+        }
+
+        if ($needIos) {
+            $r = \FirebaseAPI::getIosConfig($token, $projectId, $iosId);
+            if (empty($r['error'])) {
+                $payload = ['ios_google_service_plist' => $r['content'], 'ios_uploaded_at' => date('Y-m-d H:i:s')];
+                if ($fbRow) {
+                    Capsule::table('mod_smartersxconnect_firebase_config')->where('id', $fbRow->id)->update($payload);
+                } else {
+                    Capsule::table('mod_smartersxconnect_firebase_config')->insert($payload);
+                }
+            }
+        }
+    }
+
+    private static function loadFirebaseLibs(): void
+    {
+        static $loaded = false;
+        if ($loaded) return;
+        require_once __DIR__ . '/FirebaseAuth.php';
+        require_once __DIR__ . '/FirebaseAPI.php';
+        $loaded = true;
+    }
+
+    private static function fbMgrAbsoluteModulelink(): string
+    {
+        $systemUrl   = rtrim(\App::getSystemURL(), '/');
+        $adminFolder = \App::get_admin_folder_name();
+        return $systemUrl . '/' . $adminFolder . '/addonmodules.php?module=smartersxconnect';
+    }
+
+    private static function fbMgrRedirectUri(): string
+    {
+        return self::fbMgrAbsoluteModulelink() . '&action=firebase_manager';
+    }
+
+    private static function handleFirebaseDownload(string $modulelink): void
+    {
+        $type = $_GET['firebase_download'] ?? '';
+        if (!in_array($type, ['android', 'ios', 'server'], true)) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Invalid download type.'));
+            exit;
+        }
+
+        $token = \FirebaseAuth::getValidAccessToken();
+        if (!$token) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Session expired. Please re-authenticate.'));
+            exit;
+        }
+
+        $row       = \FirebaseAuth::getRow();
+        $projectId = $row ? ($row->selected_project_id ?? '') : '';
+        if (!$projectId) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('No project selected.'));
+            exit;
+        }
+
+        if ($type === 'android') {
+            $appId = $row ? ($row->android_app_id ?? '') : '';
+            if (!$appId) {
+                header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('No Android app registered.'));
+                exit;
+            }
+            $result = \FirebaseAPI::getAndroidConfig($token, $projectId, $appId);
+        } elseif ($type === 'ios') {
+            $appId = $row ? ($row->ios_app_id ?? '') : '';
+            if (!$appId) {
+                header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('No iOS app registered.'));
+                exit;
+            }
+            $result = \FirebaseAPI::getIosConfig($token, $projectId, $appId);
+        } else {
+            $result = \FirebaseAPI::getServiceAccountKey($token, $projectId);
+        }
+
+        if (!empty($result['error'])) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode($result['error']));
+            exit;
+        }
+
+        // Auto-save android/ios configs to firebase_config table for the mobile API.
+        // Auto-save server keys as FCM credentials for payment notification sends.
+        if ($type === 'android') {
+            self::ensureFirebaseConfigTable();
+            $fbRow = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+            if ($fbRow) {
+                Capsule::table('mod_smartersxconnect_firebase_config')->where('id', $fbRow->id)->update([
+                    'android_google_services_json' => $result['content'],
+                    'android_uploaded_at'           => date('Y-m-d H:i:s'),
+                ]);
+            } else {
+                Capsule::table('mod_smartersxconnect_firebase_config')->insert([
+                    'android_google_services_json' => $result['content'],
+                    'android_uploaded_at'           => date('Y-m-d H:i:s'),
+                ]);
+            }
+        } elseif ($type === 'ios') {
+            self::ensureFirebaseConfigTable();
+            $fbRow = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+            if ($fbRow) {
+                Capsule::table('mod_smartersxconnect_firebase_config')->where('id', $fbRow->id)->update([
+                    'ios_google_service_plist' => $result['content'],
+                    'ios_uploaded_at'           => date('Y-m-d H:i:s'),
+                ]);
+            } else {
+                Capsule::table('mod_smartersxconnect_firebase_config')->insert([
+                    'ios_google_service_plist' => $result['content'],
+                    'ios_uploaded_at'           => date('Y-m-d H:i:s'),
+                ]);
+            }
+        } elseif ($type === 'server') {
+            self::loadNotificationHelpers();
+            if (function_exists('smartersxconnect_store_service_account_credentials')) {
+                $saveResult = smartersxconnect_store_service_account_credentials($result['content']);
+                if (empty($saveResult['ok'])) {
+                    header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode($saveResult['error'] ?? 'Unable to save server key.'));
+                    exit;
+                }
+            }
+        }
+
+        if (ob_get_level() > 0) ob_clean();
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . basename($result['filename']) . '"');
+        header('Content-Length: ' . strlen($result['content']));
+        header('Cache-Control: no-cache, must-revalidate');
+        echo $result['content'];
+        exit;
+    }
+
+    private static function handleFirebaseOAuthCallback(string $modulelink): void
+    {
+        $code  = trim($_GET['code'] ?? '');
+        $state = trim($_GET['state'] ?? '');
+
+        if (session_status() !== PHP_SESSION_ACTIVE) session_start();
+        if (empty($_SESSION['fb_oauth_state']) || $state !== $_SESSION['fb_oauth_state']) {
+            unset($_SESSION['fb_oauth_state']);
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('OAuth state mismatch. Please try again.'));
+            exit;
+        }
+        unset($_SESSION['fb_oauth_state']);
+
+        if (empty($code)) {
+            $errMsg = trim($_GET['error_description'] ?? ($_GET['error'] ?? 'OAuth authorization was denied.'));
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode($errMsg));
+            exit;
+        }
+
+        $result = \FirebaseAuth::exchangeCode($code, self::fbMgrRedirectUri());
+        if (!empty($result['error'])) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode($result['error']));
+            exit;
+        }
+        header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_connected=1');
+        exit;
+    }
+
+    private static function handleSaveFirebaseOAuthCreds(string $modulelink): void
+    {
+        $clientId     = trim($_POST['fb_client_id'] ?? '');
+        $clientSecret = trim($_POST['fb_client_secret'] ?? '');
+        if (empty($clientId)) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Client ID is required.'));
+            exit;
+        }
+        \FirebaseAuth::saveCredentials($clientId, $clientSecret);
+        header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_saved=1');
+        exit;
+    }
+
+    private static function handleFirebaseOAuthDisconnect(string $modulelink): void
+    {
+        \FirebaseAuth::disconnect();
+        header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_disconnected=1');
+        exit;
+    }
+
+    private static function handleFirebaseSelectProject(string $modulelink): void
+    {
+        set_time_limit(300);
+        $projectId = trim($_POST['fb_project_id'] ?? '');
+        if (empty($projectId)) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Please select a project.'));
+            exit;
+        }
+        \FirebaseAuth::saveProjectId($projectId);
+
+        $token = \FirebaseAuth::getValidAccessToken();
+        if (!$token) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Access token expired — please re-authenticate in Step 1.'));
+            exit;
+        }
+
+        // Fetch service account key for FCM sending
+        $saError = null;
+        $keyResult = \FirebaseAPI::getServiceAccountKey($token, $projectId);
+        if (empty($keyResult['error'])) {
+            self::loadNotificationHelpers();
+            if (function_exists('smartersxconnect_store_service_account_credentials')) {
+                smartersxconnect_store_service_account_credentials($keyResult['content']);
+            }
+        } else {
+            $saError = $keyResult['error'];
+        }
+
+        // Auto-register Android app
+        $packageName     = 'com.techsmarters.smarterx';
+        $whmcsName       = Capsule::table('tblconfiguration')->where('setting', 'CompanyName')->value('value') ?? '';
+        $androidResult   = \FirebaseAPI::createAndroidApp($token, $projectId, $packageName, $whmcsName);
+        $androidError    = null;
+        if (!empty($androidResult['error'])) {
+            $androidError = $androidResult['error'];
+        } else {
+            $androidAppId = $androidResult['appId'] ?? '';
+            \FirebaseAuth::saveAndroidAppId($androidAppId);
+            if ($androidAppId) {
+                $cfg = \FirebaseAPI::getAndroidConfig($token, $projectId, $androidAppId);
+                if (empty($cfg['error'])) {
+                    self::ensureFirebaseConfigTable();
+                    $fbRow   = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+                    $payload = ['android_google_services_json' => $cfg['content'], 'android_uploaded_at' => date('Y-m-d H:i:s')];
+                    if ($fbRow) Capsule::table('mod_smartersxconnect_firebase_config')->where('id', $fbRow->id)->update($payload);
+                    else        Capsule::table('mod_smartersxconnect_firebase_config')->insert($payload);
+                }
+            }
+        }
+
+        // Auto-register iOS app
+        $bundleId    = 'com.techsmarters.smarterx';
+        $appStoreId  = '1643695817';
+        $iosResult   = \FirebaseAPI::createIosApp($token, $projectId, $bundleId, $whmcsName, $appStoreId);
+        $iosError    = null;
+        if (!empty($iosResult['error'])) {
+            $iosError = $iosResult['error'];
+        } else {
+            $iosAppId = $iosResult['appId'] ?? '';
+            \FirebaseAuth::saveIosAppId($iosAppId);
+            if ($iosAppId) {
+                $cfg = \FirebaseAPI::getIosConfig($token, $projectId, $iosAppId);
+                if (empty($cfg['error'])) {
+                    self::ensureFirebaseConfigTable();
+                    $fbRow   = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+                    $payload = ['ios_google_service_plist' => $cfg['content'], 'ios_uploaded_at' => date('Y-m-d H:i:s')];
+                    if ($fbRow) Capsule::table('mod_smartersxconnect_firebase_config')->where('id', $fbRow->id)->update($payload);
+                    else        Capsule::table('mod_smartersxconnect_firebase_config')->insert($payload);
+                }
+            }
+        }
+
+        // Build redirect with consolidated status
+        $params = '&fb_mgr_project_saved=1';
+        if ($saError)     $params .= '&fb_mgr_sa_warn='      . urlencode($saError);
+        if ($androidError) $params .= '&fb_mgr_android_warn=' . urlencode($androidError);
+        if ($iosError)     $params .= '&fb_mgr_ios_warn='     . urlencode($iosError);
+        if (!$androidError && !$iosError) $params .= '&fb_mgr_apps_created=1';
+
+        header('Location: ' . $modulelink . '&action=firebase_manager' . $params);
+        exit;
+    }
+
+    private static function handleRefetchServiceAccount(string $modulelink): void
+    {
+        self::loadFirebaseLibs();
+        $row = \FirebaseAuth::getRow();
+        $projectId = $row ? ($row->selected_project_id ?? '') : '';
+        if (!$projectId) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('No project selected. Complete Step 2 first.'));
+            exit;
+        }
+        $token = \FirebaseAuth::getValidAccessToken();
+        if (!$token) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Access token expired. Please re-authenticate in Step 1.'));
+            exit;
+        }
+        $keyResult = \FirebaseAPI::getServiceAccountKey($token, $projectId);
+        if (!empty($keyResult['error'])) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Service account fetch failed: ' . $keyResult['error']));
+            exit;
+        }
+        self::loadNotificationHelpers();
+        if (function_exists('smartersxconnect_store_service_account_credentials')) {
+            smartersxconnect_store_service_account_credentials($keyResult['content']);
+        }
+        header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_sa_ok=1');
+        exit;
+    }
+
+    private static function handleFirebaseCreateAndroid(string $modulelink): void
+    {
+        set_time_limit(120);
+        $packageName = trim($_POST['fb_android_package'] ?? '');
+        $displayName = trim($_POST['fb_android_name'] ?? '');
+        if (empty($packageName)) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Package name is required.'));
+            exit;
+        }
+        $token = \FirebaseAuth::getValidAccessToken();
+        if (!$token) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Session expired. Please re-authenticate.'));
+            exit;
+        }
+        $row       = \FirebaseAuth::getRow();
+        $projectId = $row ? ($row->selected_project_id ?? '') : '';
+        if (!$projectId) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('No project selected.'));
+            exit;
+        }
+        $result = \FirebaseAPI::createAndroidApp($token, $projectId, $packageName, $displayName);
+        if (!empty($result['error'])) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode($result['error']));
+            exit;
+        }
+        $appId = $result['appId'] ?? '';
+        \FirebaseAuth::saveAndroidAppId($appId);
+        // Auto-save config to DB immediately so Notifications tab shows it right away
+        if ($appId) {
+            $cfg = \FirebaseAPI::getAndroidConfig($token, $projectId, $appId);
+            if (empty($cfg['error'])) {
+                self::ensureFirebaseConfigTable();
+                $fbRow = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+                $payload = ['android_google_services_json' => $cfg['content'], 'android_uploaded_at' => date('Y-m-d H:i:s')];
+                if ($fbRow) Capsule::table('mod_smartersxconnect_firebase_config')->where('id', $fbRow->id)->update($payload);
+                else Capsule::table('mod_smartersxconnect_firebase_config')->insert($payload);
+            }
+        }
+        header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_app_created=android');
+        exit;
+    }
+
+    private static function handleFirebaseCreateIos(string $modulelink): void
+    {
+        set_time_limit(120);
+        $bundleId    = trim($_POST['fb_ios_bundle'] ?? '');
+        $displayName = trim($_POST['fb_ios_name'] ?? '');
+        $appStoreId  = trim($_POST['fb_ios_appstore'] ?? '');
+        if (empty($bundleId)) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Bundle ID is required.'));
+            exit;
+        }
+        $token = \FirebaseAuth::getValidAccessToken();
+        if (!$token) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('Session expired. Please re-authenticate.'));
+            exit;
+        }
+        $row       = \FirebaseAuth::getRow();
+        $projectId = $row ? ($row->selected_project_id ?? '') : '';
+        if (!$projectId) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode('No project selected.'));
+            exit;
+        }
+        $result = \FirebaseAPI::createIosApp($token, $projectId, $bundleId, $displayName, $appStoreId);
+        if (!empty($result['error'])) {
+            header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_error=' . urlencode($result['error']));
+            exit;
+        }
+        $appId = $result['appId'] ?? '';
+        \FirebaseAuth::saveIosAppId($appId);
+        // Auto-save config to DB immediately so Notifications tab shows it right away
+        if ($appId) {
+            $cfg = \FirebaseAPI::getIosConfig($token, $projectId, $appId);
+            if (empty($cfg['error'])) {
+                self::ensureFirebaseConfigTable();
+                $fbRow = Capsule::table('mod_smartersxconnect_firebase_config')->orderBy('id', 'asc')->first();
+                $payload = ['ios_google_service_plist' => $cfg['content'], 'ios_uploaded_at' => date('Y-m-d H:i:s')];
+                if ($fbRow) Capsule::table('mod_smartersxconnect_firebase_config')->where('id', $fbRow->id)->update($payload);
+                else Capsule::table('mod_smartersxconnect_firebase_config')->insert($payload);
+            }
+        }
+        header('Location: ' . $modulelink . '&action=firebase_manager&fb_mgr_app_created=ios');
+        exit;
+    }
+
+    private static function renderFirebaseManager(array $vars): void
+    {
+        $modulelink  = $vars['modulelink'] ?? '';
+        $row         = \FirebaseAuth::getRow();
+        $isConnected = \FirebaseAuth::isConnected();
+        $hasCreds    = \FirebaseAuth::hasCredentials();
+        $projectId   = $row ? ($row->selected_project_id ?? '') : '';
+        $androidId   = $row ? ($row->android_app_id ?? '') : '';
+        $iosId       = $row ? ($row->ios_app_id ?? '') : '';
+
+        // Build the absolute redirect URI once — used for both the auth button and token exchange
+        $absModulelink  = self::fbMgrAbsoluteModulelink();
+        $oauthRedirect  = $absModulelink . '&action=firebase_manager';
+        $ml             = htmlspecialchars($modulelink);
+
+        // Defaults for Step 3 forms
+        $defaultBundleId   = 'com.techsmarters.smarterx';
+        $whmcsCompanyName  = Capsule::table('tblconfiguration')->where('setting', 'CompanyName')->value('value') ?? '';
+
+        // Alerts
+        if (!empty($_GET['fb_mgr_error'])) {
+            echo '<div class="alert alert-danger"><strong>Error:</strong> ' . htmlspecialchars($_GET['fb_mgr_error']) . '</div>';
+        }
+        if (!empty($_GET['fb_mgr_connected'])) {
+            echo '<div class="alert alert-success"><strong>Connected!</strong> Google account linked successfully.</div>';
+        }
+        if (!empty($_GET['fb_mgr_saved'])) {
+            echo '<div class="alert alert-success">OAuth credentials saved.</div>';
+        }
+        if (!empty($_GET['fb_mgr_disconnected'])) {
+            echo '<div class="alert alert-info">Disconnected from Google. Credentials are still saved.</div>';
+        }
+        if (!empty($_GET['fb_mgr_project_saved'])) {
+            echo '<div class="alert alert-success">Firebase project selected.</div>';
+        }
+        if (!empty($_GET['fb_mgr_sa_ok'])) {
+            echo '<div class="alert alert-success">Firebase service account saved for payment notifications.</div>';
+        }
+        if (!empty($_GET['fb_mgr_sa_warn'])) {
+            echo '<div class="alert alert-warning"><strong>Firebase project selected, but service account was not saved:</strong> ' . htmlspecialchars($_GET['fb_mgr_sa_warn']) . '</div>';
+        }
+        if (!empty($_GET['fb_mgr_app_created'])) {
+            $which = $_GET['fb_mgr_app_created'] === 'android' ? 'Android' : 'iOS';
+            echo '<div class="alert alert-success"><strong>' . $which . ' app created!</strong> Proceed to Step 4 to configure APNs, then Step 5 to download config files.</div>';
+        }
+        if (!empty($_GET['fb_mgr_apps_created'])) {
+            echo '<div class="alert alert-success"><strong>Project selected &amp; both apps registered!</strong> Android and iOS apps are ready. Proceed to Step 4 to configure APNs.</div>';
+        }
+        if (!empty($_GET['fb_mgr_android_warn'])) {
+            echo '<div class="alert alert-warning"><strong>Android app registration failed:</strong> ' . htmlspecialchars($_GET['fb_mgr_android_warn']) . '</div>';
+        }
+        if (!empty($_GET['fb_mgr_ios_warn'])) {
+            echo '<div class="alert alert-warning"><strong>iOS app registration failed:</strong> ' . htmlspecialchars($_GET['fb_mgr_ios_warn']) . '</div>';
+        }
+
+        echo '<style>
+.fb-step{margin-bottom:18px}
+.fb-step .panel-heading{display:flex;align-items:center;gap:10px}
+.fb-step-num{display:inline-flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:50%;font-weight:700;font-size:13px;
+  background:#337ab7;color:#fff;flex-shrink:0}
+.fb-step-num.done{background:#5cb85c}
+.fb-step-num.locked{background:#bbb}
+.fb-step.locked{opacity:.55;pointer-events:none}
+.fb-app-badge{display:inline-block;padding:3px 9px;background:#f5f5f5;
+  border:1px solid #ddd;border-radius:3px;font-family:monospace;font-size:12px}
+</style>';
+
+        // ── Step 1: OAuth credentials ─────────────────────────────────────────
+        $usingDummy = \FirebaseAuth::isUsingDefaultCredentials();
+        $s1badge    = ($isConnected && !$usingDummy) ? 'done' : ($isConnected ? 'done' : '');
+        echo '<div class="panel panel-default fb-step">';
+        echo '<div class="panel-heading"><span class="fb-step-num ' . $s1badge . '">1</span>'
+            . '<strong>Connect Google Account</strong>';
+        if ($isConnected && !$usingDummy) echo ' <span class="label label-success" style="margin-left:6px">&#10003; Connected</span>';
+        if ($usingDummy)                  echo ' <span class="label label-warning" style="margin-left:6px">Default Config</span>';
+        echo '</div><div class="panel-body">';
+
+        if ($usingDummy) {
+            echo '<div class="alert alert-warning" style="margin-bottom:14px">'
+                . '<strong>Default (Demo) Configuration Active.</strong> '
+                . 'The system is using built-in demo Firebase credentials. '
+                . 'Enter your own Google OAuth credentials below and click <strong>Save Credentials</strong> to connect your own Firebase project.</div>';
+        }
+
+        if (!$isConnected || $usingDummy) {
+            if ($row && !empty($row->client_id) && !$usingDummy) {
+                $storedClientId     = htmlspecialchars(substr($row->client_id, 0, 24) . '...');
+                $storedClientSecret = '';
+            } elseif ($usingDummy) {
+                $storedClientId     = htmlspecialchars($row->client_id ?? \FirebaseAuth::DEFAULT_CLIENT_ID);
+                $storedClientSecret = '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';
+            } else {
+                $storedClientId     = '';
+                $storedClientSecret = '';
+            }
+
+            echo '<p class="text-muted" style="margin-bottom:12px">Create OAuth 2.0 credentials in '
+                . '<a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud Console</a> '
+                . '(type: <strong>Web application</strong>). Add this as an Authorised redirect URI:<br>'
+                . '<code>' . htmlspecialchars($oauthRedirect) . '</code></p>';
+
+            echo '<form method="post" action="' . $ml . '&action=firebase_manager">';
+            echo '<div class="form-group"><label>Client ID</label>'
+                . '<input type="text" name="fb_client_id" class="form-control" required '
+                . 'placeholder="xxxx.apps.googleusercontent.com"'
+                . ($storedClientId ? ' value="' . $storedClientId . '"' : '') . '></div>';
+            echo '<div class="form-group"><label>Client Secret</label>'
+                . '<input type="password" name="fb_client_secret" class="form-control" '
+                . ($hasCreds && !$usingDummy ? 'placeholder="(leave blank to keep current)"' : 'required placeholder="GOCSPx-..."')
+                . ($storedClientSecret ? ' value="' . htmlspecialchars($storedClientSecret) . '"' : '')
+                . '></div>';
+            echo '<button type="submit" name="save_firebase_oauth_creds" value="1" class="btn btn-default">Save Credentials</button>';
+
+            if ($hasCreds && !$usingDummy) {
+                if (session_status() !== PHP_SESSION_ACTIVE) session_start();
+                $state = bin2hex(random_bytes(12));
+                $_SESSION['fb_oauth_state'] = $state;
+                $authUrl = \FirebaseAuth::getAuthUrl($oauthRedirect, $state);
+                echo ' <a href="' . htmlspecialchars($authUrl) . '" class="btn btn-primary" style="margin-left:8px">'
+                    . '<span class="glyphicon glyphicon-log-in"></span> Connect with Google</a>';
+            }
+            echo '</form>';
+        } else {
+            echo '<p>Google OAuth is active and will refresh automatically.</p>';
+            echo '<form method="post" action="' . $ml . '&action=firebase_manager" style="display:inline">'
+                . '<button type="submit" name="firebase_oauth_disconnect" value="1" class="btn btn-danger btn-sm" '
+                . 'onclick="return confirm(\'Disconnect? The selected project and app IDs will be cleared.\')">Disconnect</button></form>';
+
+            if ($hasCreds) {
+                if (session_status() !== PHP_SESSION_ACTIVE) session_start();
+                $state = bin2hex(random_bytes(12));
+                $_SESSION['fb_oauth_state'] = $state;
+                $authUrl = \FirebaseAuth::getAuthUrl($oauthRedirect, $state);
+                echo ' <a href="' . htmlspecialchars($authUrl) . '" class="btn btn-default btn-sm">Re-authenticate</a>';
+            }
+        }
+        echo '</div></div>';
+
+        // ── Step 2: Select project ────────────────────────────────────────────
+        $s2locked = !$isConnected;
+        $s2done   = $isConnected && $projectId !== '';
+        $s2badge  = $s2done ? 'done' : ($s2locked ? 'locked' : '');
+
+        echo '<div class="panel panel-default fb-step' . ($s2locked ? ' locked' : '') . '">';
+        echo '<div class="panel-heading"><span class="fb-step-num ' . $s2badge . '">2</span>'
+            . '<strong>Select Firebase Project</strong>';
+        if ($s2done) echo ' <span class="label label-success" style="margin-left:6px">&#10003; ' . htmlspecialchars($projectId) . '</span>';
+        echo '</div><div class="panel-body">';
+
+        if ($isConnected) {
+            $token      = \FirebaseAuth::getValidAccessToken();
+            $projects   = [];
+            $listErr    = null;
+            if ($token) {
+                $listRes = \FirebaseAPI::listProjects($token);
+                if (isset($listRes['error'])) $listErr = $listRes['error'];
+                else $projects = $listRes['projects'];
+            } else {
+                $listErr = 'Access token expired. Please re-authenticate in Step 1.';
+            }
+
+            if ($listErr) {
+                echo '<div class="alert alert-warning">' . htmlspecialchars($listErr) . '</div>';
+            } elseif (empty($projects)) {
+                echo '<p class="text-muted">No Firebase projects found. '
+                    . '<a href="https://console.firebase.google.com/" target="_blank" rel="noopener">Create a project</a> first, then return here.</p>';
+            } else {
+                echo '<form method="post" action="' . $ml . '&action=firebase_manager">';
+                echo '<div class="form-group"><label>Firebase Project</label>'
+                    . '<select name="fb_project_id" class="form-control" style="max-width:440px">';
+                foreach ($projects as $p) {
+                    $pid  = htmlspecialchars($p['projectId'] ?? '');
+                    $pnm  = htmlspecialchars($p['displayName'] ?? ($p['projectId'] ?? ''));
+                    $sel  = ($pid === htmlspecialchars($projectId)) ? ' selected' : '';
+                    echo '<option value="' . $pid . '"' . $sel . '>' . $pnm . ' (' . $pid . ')</option>';
+                }
+                echo '</select></div>';
+                echo '<button type="submit" name="firebase_select_project" value="1" class="btn btn-primary">Select Project</button>';
+                echo '</form>';
+            }
+        } else {
+            echo '<p class="text-muted">Complete Step 1 first.</p>';
+        }
+        echo '</div></div>';
+
+        // ── Step 3: Create apps (auto-handled on project select — hidden from admin) ──
+        $s3locked = !$s2done;
+        $s3done   = $s2done && ($androidId !== '' || $iosId !== '');
+        $s3badge  = $s3done ? 'done' : ($s3locked ? 'locked' : '');
+
+        echo '<div class="panel panel-default fb-step' . ($s3locked ? ' locked' : '') . '" style="display:none">';
+        echo '<div class="panel-heading"><span class="fb-step-num ' . $s3badge . '">3</span>'
+            . '<strong>Register Firebase Apps</strong></div><div class="panel-body">';
+
+        if ($s2done) {
+            // Android
+            echo '<h4 style="margin-top:0">Android App</h4>';
+            if ($androidId !== '') {
+                echo '<p>App ID: <span class="fb-app-badge">' . htmlspecialchars($androidId) . '</span></p>';
+                echo '<form method="post" action="' . $ml . '&action=firebase_manager" style="display:inline">'
+                    . '<button type="submit" name="firebase_reset_android" value="1" class="btn btn-default btn-xs" '
+                    . 'onclick="return confirm(\'Clear saved Android App ID? The app stays in Firebase Console.\')">Clear &amp; Re-enter</button></form>';
+            } else {
+                echo '<form method="post" action="' . $ml . '&action=firebase_manager">';
+                echo '<div class="row">'
+                    . '<div class="col-sm-5"><div class="form-group"><label>Package Name <span class="text-danger">*</span></label>'
+                    . '<input type="text" name="fb_android_package" class="form-control" required value="' . htmlspecialchars($defaultBundleId) . '"></div></div>'
+                    . '<div class="col-sm-4"><div class="form-group"><label>Display Name</label>'
+                    . '<input type="text" name="fb_android_name" class="form-control" value="' . htmlspecialchars($whmcsCompanyName) . '" placeholder="My App"></div></div>'
+                    . '</div>';
+                echo '<button type="submit" name="firebase_create_android" value="1" class="btn btn-success">Create Android App</button>'
+                    . ' <span class="help-block" style="display:inline;margin-left:10px;font-size:12px">Calls Firebase API &mdash; may take 30&ndash;60 s.</span>';
+                echo '</form>';
+            }
+
+            echo '<hr style="margin:16px 0">';
+
+            // iOS
+            echo '<h4>iOS App</h4>';
+            if ($iosId !== '') {
+                echo '<p>App ID: <span class="fb-app-badge">' . htmlspecialchars($iosId) . '</span></p>';
+                echo '<form method="post" action="' . $ml . '&action=firebase_manager" style="display:inline">'
+                    . '<button type="submit" name="firebase_reset_ios" value="1" class="btn btn-default btn-xs" '
+                    . 'onclick="return confirm(\'Clear saved iOS App ID? The app stays in Firebase Console.\')">Clear &amp; Re-enter</button></form>';
+            } else {
+                echo '<form method="post" action="' . $ml . '&action=firebase_manager">';
+                echo '<div class="row">'
+                    . '<div class="col-sm-5"><div class="form-group"><label>Bundle ID <span class="text-danger">*</span></label>'
+                    . '<input type="text" name="fb_ios_bundle" class="form-control" required value="' . htmlspecialchars($defaultBundleId) . '"></div></div>'
+                    . '<div class="col-sm-4"><div class="form-group"><label>Display Name</label>'
+                    . '<input type="text" name="fb_ios_name" class="form-control" value="' . htmlspecialchars($whmcsCompanyName) . '" placeholder="My App"></div></div>'
+                    . '<div class="col-sm-3"><div class="form-group"><label>App Store ID</label>'
+                    . '<input type="text" name="fb_ios_appstore" class="form-control" value="1643695817" placeholder="123456789"></div></div>'
+                    . '</div>';
+                echo '<button type="submit" name="firebase_create_ios" value="1" class="btn btn-success">Create iOS App</button>'
+                    . ' <span class="help-block" style="display:inline;margin-left:10px;font-size:12px">Calls Firebase API &mdash; may take 30&ndash;60 s.</span>';
+                echo '</form>';
+            }
+        } else {
+            echo '<p class="text-muted">Complete Step 2 first.</p>';
+        }
+        echo '</div></div>';
+
+        if (!$usingDummy):
+        // ── Step 4: APNs key for iOS push ─────────────────────────────────────
+        $s4locked = !$s3done;
+        $certDir  = __DIR__ . '/../certificate/';
+        $p8Files  = is_dir($certDir)
+            ? array_values(array_filter(scandir($certDir), fn($f) => strtolower(pathinfo($f, PATHINFO_EXTENSION)) === 'p8'))
+            : [];
+        $s4badge  = $s4locked ? 'locked' : '';
+
+        echo '<div class="panel panel-default fb-step' . ($s4locked ? ' locked' : '') . '">';
+        echo '<div class="panel-heading"><span class="fb-step-num ' . $s4badge . '">4</span>'
+            . '<strong>Upload APNs Key to Firebase Console (iOS Push)</strong></div><div class="panel-body">';
+
+        if ($s3done) {
+            // Show .p8 files already in the certificate folder
+            if (!empty($p8Files)) {
+                echo '<div class="alert alert-info" style="margin-bottom:16px">'
+                    . '<strong>APNs key found in <code>certificate/</code> folder:</strong><br>'
+                    . implode('<br>', array_map(fn($f) => '<code>' . htmlspecialchars($f) . '</code>', $p8Files))
+                    . '<br><small class="text-muted">Use this file when uploading to Firebase Console in Step 3 below.</small>'
+                    . '</div>';
+            } else {
+                echo '<div class="alert alert-warning" style="margin-bottom:16px">'
+                    . 'No <code>.p8</code> file found in <code>certificate/</code> folder. '
+                    . 'Generate one in Apple Developer Portal (Step 1 below) and place it there.'
+                    . '</div>';
+            }
+
+            echo '<h4 style="margin-top:0">Upload APNs Key to Firebase Console</h4>';
+            echo '<ol style="line-height:2;margin-bottom:0">'
+                . '<li>Open <a href="https://console.firebase.google.com/project/' . htmlspecialchars($projectId ?: '_') . '/settings/cloudmessaging" target="_blank" rel="noopener">'
+                . '<strong>Firebase Console &rarr; Project Settings &rarr; Cloud Messaging</strong></a>'
+                . ($projectId ? ' <span class="label label-default">' . htmlspecialchars($projectId) . '</span>' : '') . '</li>'
+                . '<li>Scroll down to <strong>Apple app configuration</strong></li>'
+                . '<li>Find your iOS app row — bundle ID: <code>' . htmlspecialchars($defaultBundleId) . '</code></li>'
+                . '<li>Under <strong>APNs Authentication Key</strong> click <strong>Upload</strong></li>'
+                . '<li>Select your <code>.p8</code> file, enter the <strong>Key ID</strong> and <strong>Team ID</strong>, then click <strong>Upload</strong></li>'
+                . '</ol>';
+
+            echo '<div class="alert alert-warning" style="margin-top:14px;margin-bottom:0">'
+                . '<strong>Note:</strong> One APNs Auth Key covers both production and sandbox (development) environments. '
+                . 'Firebase has no API for this step — it must be done in Firebase Console.</div>';
+        } else {
+            echo '<p class="text-muted">Complete Step 3 first.</p>';
+        }
+        echo '</div></div>';
+
+        // ── Step 5: Download configs ──────────────────────────────────────────
+        $s5locked = !$s3done;
+        $s5badge  = $s5locked ? 'locked' : '';
+
+        echo '<div class="panel panel-default fb-step' . ($s5locked ? ' locked' : '') . '">';
+        echo '<div class="panel-heading"><span class="fb-step-num ' . $s5badge . '">5</span>'
+            . '<strong>Download Config Files</strong></div><div class="panel-body">';
+
+        if ($s3done) {
+            echo '<p class="text-muted" style="margin-bottom:14px">Android and iOS config files are <strong>also saved automatically</strong> '
+                . 'to the Notifications tab so the mobile app can fetch them via the API endpoint.</p>';
+
+            echo '<div class="row">';
+            if ($androidId !== '') {
+                echo '<div class="col-sm-4"><div class="panel panel-default" style="text-align:center;padding:20px 12px">'
+                    . '<div style="font-size:30px;margin-bottom:6px">&#x1F4F1;</div>'
+                    . '<strong>Android</strong><br><small class="text-muted">google-services.json</small><br><br>'
+                    . '<a href="' . $ml . '&action=firebase_manager&firebase_download=android" class="btn btn-primary btn-sm">Download</a>'
+                    . '</div></div>';
+            }
+            if ($iosId !== '') {
+                echo '<div class="col-sm-4"><div class="panel panel-default" style="text-align:center;padding:20px 12px">'
+                    . '<div style="font-size:30px;margin-bottom:6px">&#xF8FF;</div>'
+                    . '<strong>iOS</strong><br><small class="text-muted">GoogleService-Info.plist</small><br><br>'
+                    . '<a href="' . $ml . '&action=firebase_manager&firebase_download=ios" class="btn btn-primary btn-sm">Download</a>'
+                    . '</div></div>';
+            }
+            echo '<div class="col-sm-4"><div class="panel panel-default" style="text-align:center;padding:20px 12px">'
+                . '<div style="font-size:30px;margin-bottom:6px">&#x1F511;</div>'
+                . '<strong>Server Key</strong><br><small class="text-muted">firebase-adminsdk.json</small><br><br>'
+                . '<a href="' . $ml . '&action=firebase_manager&firebase_download=server" class="btn btn-warning btn-sm" '
+                . 'onclick="return confirm(\'Each download creates a new IAM key in your project. Continue?\')">Download</a>'
+                . '</div></div>';
+            echo '</div>';
+
+            echo '<div class="alert alert-info" style="margin-bottom:0">'
+                . '<strong>Note:</strong> Each Server Key download creates a new IAM key in Google Cloud. '
+                . 'Manage or revoke old keys in '
+                . '<a href="https://console.cloud.google.com/iam-admin/serviceaccounts" target="_blank" rel="noopener">Cloud Console &rarr; Service Accounts</a>.'
+                . '</div>';
+        } else {
+            echo '<p class="text-muted">Complete Step 3 first.</p>';
+        }
+        echo '</div></div>';
+        endif; // !$usingDummy
     }
 }
